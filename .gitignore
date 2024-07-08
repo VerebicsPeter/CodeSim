@@ -7,3 +7,6 @@
 bin/
 build/
 __pycache__/
+
+# tensor board
+runs/
