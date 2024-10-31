@@ -13,3 +13,5 @@ runs/
 
 # codenet paths
 paths.ini
+
+*.bak
