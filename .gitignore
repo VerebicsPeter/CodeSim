@@ -18,3 +18,5 @@ paths.ini
 
 # zip the csvs
 *.csv
+
+.ipynb_checkpoints
