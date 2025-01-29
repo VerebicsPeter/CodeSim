@@ -37,7 +37,7 @@ def create_embedding_pipeline(transformer: PreTrainedModel) -> EmbeddingPipeline
 
 class Trainer(Protocol):
     # Returns train and validation losses in a tuple
-    def train(self, epochs: int) -> Tuple: ...
+    def train(self, epochs: int, **kwargs) -> Tuple: ...
 
 
 class ContrastiveCodeSimilarityModel(nn.Module):
@@ -292,7 +292,7 @@ class BERTCodeSimilarityTrainer(Trainer):
         mean_loss = loss / count
         return mean_loss
     
-    def train(self, epochs: int, iters_to_accumulate: int):
+    def train(self, epochs: int, iters_to_accumulate: int = 2):
         BEST_MODEL_PATH = "best_model.pt"  # path to save the best model to
         train_losses, valid_losses = [], []
         best_loss = np.Inf
