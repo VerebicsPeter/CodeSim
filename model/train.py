@@ -1,3 +1,4 @@
+import argparse
 import random
 import numpy as np
 import pandas as pd
@@ -53,7 +54,6 @@ def train_finetuned(
     # The gradient accumulation adds gradients over an effective batch of size : bs * iters_to_accumulate.
     # If set to "1", you get the usual batch size
     iters_to_accumulate = 2,
-    
     # Model specific parameters
     freeze_bert  = False,  # NOTE: if true the BERT model is not finetuned
     dropout_rate = 0.2,
@@ -176,6 +176,48 @@ def train_contrastive(
     trainer.train(epochs=epochs)
 
 
+TRAIN_FUNCTIONS = {
+    "contrastive": (train_contrastive,
+    {
+        "pretrained_bert_name": "huggingface/CodeBERTa-small-v1",
+        "epochs": 4,
+        "lr": 1e-5,  # Learning rate
+        "wd": 1e-5,  # Weight decay
+        "bs": 20,    # Batch size
+        # The gradient accumulation adds gradients over an effective batch of size : bs * iters_to_accumulate.
+        # If set to "1", you get the usual batch size
+        "iters_to_accumulate": 2,
+        # Model specific parameters
+        "freeze_bert": False,  # NOTE: if true the BERT model is not finetuned
+        "dropout_rate": 0.2,
+    }),
+    "finetuned": (train_finetuned,
+    {
+        "pretrained_bert_name": "huggingface/CodeBERTa-small-v1",
+        "epochs": 4,
+        "lr": 1e-5,  # Learning rate
+        "wd": 1e-5,  # Weight decay
+        "bs": 20,  # NOTE: Bigger batch size generally leads to better results in contrastive learning
+        "is_self_supervised": False,
+    }),
+}
+
+
 if __name__ == "__main__":
     set_seed(42)
-    train_finetuned()
+    
+    # Parse the model type first
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", choices=TRAIN_FUNCTIONS.keys(), required=True, help="Model type to train")
+    known_args, unknown_args = parser.parse_known_args()
+    # Select the train function and default parameters
+    train_func, default_params = TRAIN_FUNCTIONS[known_args.model]
+    
+    # Parse the rest of the parameters based on default ones
+    parser = argparse.ArgumentParser()
+    for param, default in default_params.items():
+        parser.add_argument(f"--{param}", type=type(default), default=default)
+    args = parser.parse_args(unknown_args)
+    
+    # Train the model
+    train_func(**vars(args))
