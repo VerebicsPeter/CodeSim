@@ -177,7 +177,7 @@ def train_contrastive(
 
 
 TRAIN_FUNCTIONS = {
-    "contrastive": (train_contrastive,
+    "finetuned": (train_finetuned,
     {
         "pretrained_bert_name": "huggingface/CodeBERTa-small-v1",
         "epochs": 4,
@@ -191,7 +191,7 @@ TRAIN_FUNCTIONS = {
         "freeze_bert": False,  # NOTE: if true the BERT model is not finetuned
         "dropout_rate": 0.2,
     }),
-    "finetuned": (train_finetuned,
+    "contrastive": (train_contrastive,
     {
         "pretrained_bert_name": "huggingface/CodeBERTa-small-v1",
         "epochs": 4,
