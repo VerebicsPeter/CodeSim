@@ -91,6 +91,7 @@ def train_finetuned(
         freeze_bert =freeze_bert,
         dropout_rate=dropout_rate,
     )
+    model.to(DEVICE)
     
     loss_func = nn.BCEWithLogitsLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
@@ -158,7 +159,7 @@ def train_contrastive(
     
     embedding_pipeline = code_sim_models.create_embedding_pipeline(transformer)
     
-    model = code_sim_models.ContrastiveCodeSimilarityModel(embedding_pipeline)
+    model = code_sim_models.ContrastiveCodeSimilarityModel(embedding_pipeline).to(DEVICE)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=4, gamma=0.1)
     
