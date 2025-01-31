@@ -122,7 +122,7 @@ def train_contrastive(
     bs = 20,  # NOTE: Bigger batch size generally leads to better results in contrastive learning
     is_self_supervised = False,
 ):
-    # augment function
+    # Augment function
     def minify(code: str) -> str:
         try: return python_minifier.minify(code)
         except Exception as error:
@@ -132,17 +132,16 @@ def train_contrastive(
     tokenizer = AutoTokenizer.from_pretrained(pretrained_bert_name)
     
     if is_self_supervised:
-        dataset = code_sim_datasets.UnlabeledCodeDataset.from_csv_data(
-            path= contrastive_dataset_url_unlabeled,
-            tokenizer=tokenizer,
-            aug_funcs=[minify]
-        )
+        url = contrastive_dataset_url_unlabeled
     else:
-        dataset = code_sim_datasets.LabeledCodeDataset.from_csv_data(
-            path= contrastive_dataset_url_labeled,
-            tokenizer=tokenizer,
-            aug_funcs=[minify]
-        )
+        url = contrastive_dataset_url_labeled
+    
+    dataset = code_sim_datasets.UnlabeledCodeDataset.from_csv_data(
+        path=url,
+        tokenizer=tokenizer,
+        aug_funcs=[minify],
+        device=DEVICE,
+    )
     
     sample_size = 25_000
     dataset = Subset(dataset, list(range(sample_size)))
