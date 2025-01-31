@@ -86,7 +86,7 @@ class LabeledCodeDataset(Dataset):
         return self.inputs['input_ids'].shape[0]
 
     @classmethod
-    def from_csv_data(cls, path: str, tokenizer, aug_funcs: Iterable[Callable]):
+    def from_csv_data(cls, path: str, tokenizer, aug_funcs: Iterable[Callable], device: str):
         df = pd.read_csv(path)
         print(df.shape)
 
@@ -101,7 +101,7 @@ class LabeledCodeDataset(Dataset):
         labels = df['label']
         labels = labels.to_list()
 
-        return cls(tokenizer, codes, labels)
+        return cls(tokenizer, codes, labels, device)
 
 
 class UnlabeledCodeDataset(Dataset):
@@ -126,7 +126,7 @@ class UnlabeledCodeDataset(Dataset):
         return self.ref_inputs["input_ids"].shape[0]
 
     @classmethod
-    def from_csv_data(cls, path: str, tokenizer, aug_funcs: Iterable[Callable]):
+    def from_csv_data(cls, path: str, tokenizer, aug_funcs: Iterable[Callable], device: str):
         df = pd.read_csv(path)
         print(df.shape)
 
@@ -137,7 +137,7 @@ class UnlabeledCodeDataset(Dataset):
         aug_codes = aug_codes.to_list()
         # TODO: multiple augmentations
 
-        return cls(tokenizer, ref_codes, aug_codes)
+        return cls(tokenizer, ref_codes, aug_codes, device)
 
 
 def downsample_df(df: pd.DataFrame, samples_per_class, seed=42):
@@ -204,14 +204,14 @@ class CodeNetPairDataset(Dataset):
             tokens = tokenizer.encode(source, truncation=False)
             return len(tokens) <= tokenizer.model_max_length
 
-        print('filtering dataset, this might take a while ...')
+        print('Filtering dataset, this might take a while...')
         df = df[df.apply(filter_too_long_sequences, axis=1)]
         print('filtered dataset:', df.shape)
         df = downsample_df(df, samples_per_class=(num_pairs // 2))
-        print('downsampled dataset:', df.shape)
+        print('Downsampled dataset:', df.shape)
 
         codes_a = df['src_1'].to_list()
         codes_b = df['src_2'].to_list()
-        labels = df['label'].to_list()
+        labels  = df['label'].to_list()
 
         return cls(codes_a, codes_b, labels, tokenizer)
