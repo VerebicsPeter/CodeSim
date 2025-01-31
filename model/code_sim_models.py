@@ -151,7 +151,7 @@ class ContrastiveCodeSimilarityTrainer(Trainer):
             sum_loss += loss_val
             acc_loss += loss_val
             # Update loss accumulator
-            acc_loss, last_loss = get_last_loss(N_BATCHES, C_BATCHES, i, acc_loss)
+            acc_loss, last_loss = get_last_loss(i, acc_loss)
             # Log the loss to the console
             if last_loss:
                 log_loss(N_BATCHES, i, last_loss)
