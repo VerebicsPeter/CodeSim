@@ -33,9 +33,8 @@ def get_batch_encodings(
 def get_numeric_labels(labels: Iterable[str]) -> torch.Tensor:
     """Transform string labels to int labels for the NTXent loss function."""
     pos_labels = [ label for label in labels if label.endswith('1') ]
-    labels_map = { label: i for i,label in enumerate(sorted(set(pos_labels))) }
-    int_labels = [ labels_map.get(label, -1) for label in labels ]
-    int_labels = torch.Tensor(int_labels)
+    labels_map = { label: i for i, label in enumerate(sorted(set(pos_labels))) }
+    int_labels = torch.Tensor([labels_map.get(label, -1) for label in labels])
     neg_indices = (int_labels == -1).nonzero(as_tuple=True)[0]
     M = max(int_labels)
     int_labels[neg_indices] = torch.arange(M + 1, M + 1 + len(neg_indices))
