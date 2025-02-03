@@ -64,7 +64,7 @@ def train_finetuned(
     pretrained_bert_name: str = "huggingface/CodeBERTa-small-v1",
     epochs = 4,
     lr = 1e-5,  # Learning rate
-    wd = 1e-3,  # Weight decay
+    wd = 1e-5,  # Weight decay
     bs = 20,    # Batch size
     # The gradient accumulation adds gradients over an effective batch of size : bs * iters_to_accumulate.
     # If set to "1", you get the usual batch size
@@ -195,7 +195,13 @@ def train_contrastive(
         {"params": model.proj.parameters(), "lr": lr_proj, "weight_decay": wd_proj},
     ]
     optimizer = torch.optim.AdamW(param_groups)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=2, gamma=0.1)
+    scheduler = get_linear_schedule_with_warmup(
+        optimizer=optimizer,
+        # The number of steps for the warmup phase.
+        num_warmup_steps=0,
+        # Necessary to take into account Gradient accumulation
+        num_training_steps=(epochs * len(train_loader)) // iters_to_accumulate
+    )
     
     ntxent_loss = losses.NTXentLoss(temperature=0.5)
     # Wrap the NTXent loss function if needed
@@ -220,7 +226,7 @@ TRAIN_FUNCS = {
             "pretrained_bert_name": "huggingface/CodeBERTa-small-v1",
             "epochs": 4,
             "lr": 1e-5,  # Learning rate
-            "wd": 1e-4,  # Weight decay
+            "wd": 1e-5,  # Weight decay
             # Batch size
             "bs": 20,
             # The gradient accumulation adds gradients over an effective batch of size : bs * iters_to_accumulate.
@@ -239,8 +245,8 @@ TRAIN_FUNCS = {
             # Learning rates and weight decays
             "lr_bert": 1e-5,
             "wd_bert": 1e-4,
-            "lr_proj": 1e-3,
-            "wd_proj": 1e-2,
+            "lr_proj": 1e-4,
+            "wd_proj": 1e-3,
             # Batch size
             "bs": 20,  # NOTE: Bigger batch size generally leads to better results in contrastive learning
             "iters_to_accumulate": 2,
