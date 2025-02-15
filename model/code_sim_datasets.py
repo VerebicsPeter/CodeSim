@@ -139,13 +139,13 @@ class UnlabeledCodeDataset(Dataset):
         return cls(tokenizer, ref_codes, aug_codes, device)
 
 
-def downsample_df(df: pd.DataFrame, samples_per_class, seed=42):
+def downsample_df(df: pd.DataFrame, samples_per_class, seed=42, drop_old_index=True):
     pos_df = df[df['label'] == 1]
     neg_df = df[df['label'] == 0]
     pos_sampled = neg_df.sample(n=min(samples_per_class, len(pos_df)), random_state=seed)
     neg_sampled = pos_df.sample(n=min(samples_per_class, len(neg_df)), random_state=seed)
     # Combine the downsampled dataframes
-    downsampled_df = pd.concat([pos_sampled, neg_sampled]).reset_index(drop=True)
+    downsampled_df = pd.concat([pos_sampled, neg_sampled]).reset_index(drop=drop_old_index)
     return downsampled_df
 
 
