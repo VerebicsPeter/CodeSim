@@ -212,5 +212,4 @@ class CodeNetPairDataset(Dataset):
         codes_a = df['src_1'].to_list()
         codes_b = df['src_2'].to_list()
         labels  = df['label'].to_list()
-
         return cls(codes_a, codes_b, labels, tokenizer)

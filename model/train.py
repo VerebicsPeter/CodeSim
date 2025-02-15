@@ -26,6 +26,8 @@ import model.code_sim_datasets as code_sim_datasets
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+# TODO: Maybe load URLS from a .env or something
+
 # 100k dataset (TODO: train on this)
 paired_dataset_url = "https://drive.google.com/uc?export=download&id=1pUErbyZw1fBC5gIe6KT7BWga7h6Bfr4l"
 
@@ -58,6 +60,21 @@ def test_forward_passes(pretrained_bert_name: str = "huggingface/CodeBERTa-small
     
     emb2 = model2(inputs)
     print("Model 2 output shape:", emb2.shape)
+
+
+def test_predict_passes(pretrained_bert_name: str = "huggingface/CodeBERTa-small-v1"):
+    code_a = """print("Hello, World!")"""
+    code_b = """def add(x,y): return x+y"""
+    
+    bert = AutoModel.from_pretrained(pretrained_bert_name).to(DEVICE)
+    model1 = code_sim_models.FinetunedCodeSimilarityModel(bert).to(DEVICE)
+    model2 = code_sim_models.ContrastiveCodeSimilarityModel(bert).to(DEVICE)
+
+    pred1 = model1.predict(code_a, code_b)
+    print("Model 1 prediction output:", pred1, "shaped", pred1.shape)
+    
+    pred2 = model2.predict(code_a, code_b)
+    print("Model 2 prediction output:", pred2, "shaped", pred2.shape)
 
 
 def train_finetuned(
@@ -169,6 +186,7 @@ def train_contrastive(
         device=DEVICE,
     )
     
+    # TODO: Maybe don't hardcode this
     sample_size = 25_000
     dataset = Subset(dataset, list(range(sample_size)))
     
@@ -260,17 +278,20 @@ TRAIN_FUNCS = {
 
 
 if __name__ == "__main__":
+    # TODO: Maybe load this from a .env or something
     set_seed(42)
     # Parse the model type first
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", choices=TRAIN_FUNCS.keys(), required=True, help="Model type to train")
+    parser.add_argument(
+        "--model", choices=TRAIN_FUNCS.keys(), required=True, help="Model type to train")
     known_args, unknown_args = parser.parse_known_args()
     # Select the train function and default parameters
     train_func, default_params = TRAIN_FUNCS[known_args.model]
     # Parse the rest of the parameters based on default ones
     parser = argparse.ArgumentParser()
     for param, default in default_params.items():
-        parser.add_argument(f"--{param}", type=type(default), default=default)
+        parser.add_argument(
+        f"--{param}", type=type(default), default=default)
     args = parser.parse_args(unknown_args)
     # Train the model
     train_func(**vars(args))

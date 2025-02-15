@@ -10,30 +10,35 @@ from pytorch_metric_learning import losses
 
 # Hugging Face Transformers (CodeBERT etc.)
 import transformers
-from transformers import (
-    PreTrainedModel,
-    AutoModel,
-    AutoTokenizer,
-    BatchEncoding,
-    get_linear_schedule_with_warmup,
-)
+from transformers import AutoTokenizer, BatchEncoding
 
 # Libraries for logging
 from tqdm.auto import tqdm
 
-from typing import Callable, Protocol, Tuple
+from typing import Callable, Iterable, Protocol, Tuple, Any
 
 
 def freeze_model(model: nn.Module):
     for param in model.parameters(): param.requires_grad = False
 
 
+def get_tokenizer(model: transformers.PreTrainedModel) -> transformers.PreTrainedTokenizerBase:
+    if (not model.name_or_path): raise ValueError("Model's name or path is not known.")
+    return AutoTokenizer.from_pretrained(model.name_or_path)
+
+
 class Trainer(Protocol):
     # Returns train and validation losses in a tuple
-    def train(self, epochs: int, **kwargs) -> Tuple: ...
+    def train(self, epochs: int, **kwargs) -> Tuple:
+        ...
 
 
-class FinetunedCodeSimilarityModel(nn.Module):
+class SimilarityClassifier(Protocol):
+    def predict(self, code_a: str | Iterable[str], code_b: str | Iterable[str], **kwargs):
+        ...
+
+
+class FinetunedCodeSimilarityModel(nn.Module, SimilarityClassifier):
     def __init__(
         self,
         bert: transformers.BertModel,  # BERT based model instance
@@ -43,6 +48,7 @@ class FinetunedCodeSimilarityModel(nn.Module):
         super().__init__()
         if freeze_bert: freeze_model(bert)
         self.bert = bert
+        self.bert_tokenizer = None
         self.drop = nn.Dropout(dropout_rate)
         self.cls = nn.Linear(self.bert.config.hidden_size, 1)
 
@@ -54,9 +60,27 @@ class FinetunedCodeSimilarityModel(nn.Module):
         # Last linear layer
         logits = self.cls(output)
         return logits
+    
+    def predict(self, code_a: str|Iterable[str], code_b: str|Iterable[str], threshold=0.5):
+        if self.bert_tokenizer is None: self.bert_tokenizer = get_tokenizer(self.bert)
+        
+        inputs = self.bert_tokenizer(
+            code_a, code_b,
+            padding='max_length',  # Pad to max_length
+            truncation=True,       # Truncate to max_length
+            return_tensors='pt'    # Return torch.Tensor objects
+        )
+        # Put tensors to current device
+        device = self.bert.device
+        for k, v in inputs.items(): inputs[k] = v.to(device)
+        
+        logits = self.forward(inputs)
+        
+        pred = (torch.sigmoid(logits.squeeze(-1)) > threshold).int()
+        return pred
 
 
-class ContrastiveCodeSimilarityModel(nn.Module):
+class ContrastiveCodeSimilarityModel(nn.Module, SimilarityClassifier):
     def __init__(
         self,
         # BERT based model instance
@@ -71,6 +95,7 @@ class ContrastiveCodeSimilarityModel(nn.Module):
         
         if freeze_bert: freeze_model(bert)
         self.bert = bert
+        self.bert_tokenizer = None
         
         # Non linearity
         self.relu = nn.ReLU()
@@ -97,6 +122,39 @@ class ContrastiveCodeSimilarityModel(nn.Module):
         # Pass through projection head layers
         output = self.proj(output)
         return output
+
+    def predict(self, code_a: str|Iterable[str], code_b: str|Iterable[str], threshold=0.5):
+        if self.bert_tokenizer is None: self.bert_tokenizer = get_tokenizer(self.bert)
+        
+        if isinstance(code_a, str) and isinstance(code_b, str):
+            codes = [code_a, code_b]
+        else:
+            assert len(code_a) == len(code_b), "Number of paired sequences MUST match!"
+            codes = [*code_a, *code_b]
+        
+        inputs = self.bert_tokenizer(
+            codes,
+            truncation=True,
+            padding="max_length",
+            return_tensors="pt",
+        )
+        # Put tensors to current device
+        device = self.bert.device
+        for k, v in inputs.items(): inputs[k] = v.to(device)
+        
+        outputs = self.forward(inputs)
+        
+        # Calculate the pairwise cosine similarities
+        mid = len(codes)//2
+        sim = F.cosine_similarity(outputs[:mid,:],outputs[mid:,:])
+        # Scale and shift cosine similarity to [0,1]
+        sim = (sim + 1) / 2
+        
+        # TODO:
+        # Add a TRAINABLE sigmoid here with the cosine similarity as an input feature,
+        # scaling and shifting would have to be removed...
+        pred = (sim > threshold).int()
+        return pred
 
 
 class CodeSimilarityTrainer(Trainer):
