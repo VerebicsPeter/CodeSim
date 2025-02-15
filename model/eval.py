@@ -95,7 +95,7 @@ if __name__ == "__main__":
     )
     df_downsampled = code_sim_datasets.downsample_df(df, samples_per_class=25_000, seed=42)
     df_not_sampled = df[~df.index.isin(df_downsampled.index)]
-    df_evaluation  = code_sim_datasets.downsample_df(df_not_sampled, samples_per_class=500, seed=42)
+    df_evaluation  = code_sim_datasets.downsample_df(df_not_sampled, samples_per_class=500, seed=420)
     
     parser = argparse.ArgumentParser()
     parser.add_argument(
