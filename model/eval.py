@@ -116,6 +116,13 @@ if __name__ == "__main__":
         required=False,
         default="huggingface/CodeBERTa-small-v1"
     )
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        required=False,
+        default=0.5
+    )
+    
     args = parser.parse_args()
     
     ls, ps = evaluate_preds(
@@ -123,6 +130,7 @@ if __name__ == "__main__":
         model_type=args.model_type,
         model_path=args.model_path,
         pretrained_bert_name=args.pretrained_bert_name,
+        threshold=args.threshold,
     )
     
     report = classification_report(ls, ps)
