@@ -1,5 +1,4 @@
 import argparse
-import tqdm
 import random
 import numpy as np
 import pandas as pd
@@ -7,6 +6,8 @@ import pprint as pp
 
 import torch
 from torch.utils.data import Dataset, DataLoader
+
+from tqdm.auto import tqdm
 
 import transformers
 
@@ -40,8 +41,8 @@ def set_seed(seed_value):
 def evaluate_preds(
     eval_df: pd.DataFrame,
     model_type: str,
-    model_path: str = "best_model.pt",
-    pretrained_bert_name: str = "huggingface/CodeBERTa-small-v1",
+    model_path: str,
+    pretrained_bert_name: str,
     threshold = 0.5,
 ):
     class DataframeWrapper(Dataset):
@@ -99,17 +100,20 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--model_type",
-        choices=MODEL_TYPES.keys(), required=True, help="Model type to evaluate"
+        choices=MODEL_TYPES.keys(),
+        required=True, help="Model type to evaluate"
     )
     parser.add_argument(
         "--model_path",
         type=str,
-        required=False,
+        required=True, help="Model state dict path"
     )
     parser.add_argument(
         "--pretrained_bert_name",
         type=str,
         required=False,
+        default="huggingface/CodeBERTa-small-v1"
+        
     )
     args = parser.parse_args()
     
