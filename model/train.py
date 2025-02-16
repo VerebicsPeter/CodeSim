@@ -293,7 +293,7 @@ if __name__ == "__main__":
     )
     known_args, unknown_args = parser.parse_known_args()
     # Select the train function and default parameters
-    train_func, default_params = TRAIN_FUNCS[known_args.model]
+    train_func, default_params = TRAIN_FUNCS[known_args.model_type]
     # Parse the rest of the parameters based on default ones
     parser = argparse.ArgumentParser()
     for param, default in default_params.items():
