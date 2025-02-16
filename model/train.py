@@ -89,6 +89,7 @@ def train_finetuned(
     # Model specific parameters
     freeze_bert = False,  # NOTE: if true the BERT model is not finetuned
     dropout_rate = 0.2,
+    shuffle_dataloader = True,
     
 ):
     bert_tokenizer = AutoTokenizer.from_pretrained(pretrained_bert_name)
@@ -109,12 +110,11 @@ def train_finetuned(
         num_pairs=50_000,
     )
     
-    shuffle = True
     train_len = int(0.8 * len(dataset))
     valid_len = len(dataset) - train_len
     train_data, valid_data = random_split(dataset, [train_len, valid_len])
-    train_loader = DataLoader(train_data, batch_size=bs, shuffle=shuffle)
-    valid_loader = DataLoader(valid_data, batch_size=bs, shuffle=shuffle)
+    train_loader = DataLoader(train_data, batch_size=bs, shuffle=shuffle_dataloader)
+    valid_loader = DataLoader(valid_data, batch_size=bs, shuffle=shuffle_dataloader)
     
     bert_model = AutoModel.from_pretrained(pretrained_bert_name).to(DEVICE)
     
@@ -160,6 +160,7 @@ def train_contrastive(
     # Model specific parameters
     freeze_bert = False,  # NOTE: if true the BERT model is not finetuned
     dropout_rate = 0.2,
+    shuffle_dataloader = True,
     # Flag for self supervised training
     is_self_supervised = False,
 ):
@@ -186,16 +187,17 @@ def train_contrastive(
         device=DEVICE,
     )
     
-    # TODO: Maybe don't hardcode this
+    # TODO: don't hardcode this
     sample_size = 25_000
     dataset = Subset(dataset, list(range(sample_size)))
     
-    shuffle = False
     train_len = int(0.8 * len(dataset))
     valid_len = len(dataset) - train_len
     train_data, valid_data = random_split(dataset, [train_len, valid_len])
-    train_loader = DataLoader(train_data, batch_size=bs, shuffle=shuffle)
-    valid_loader = DataLoader(valid_data, batch_size=bs, shuffle=shuffle)
+    train_loader = DataLoader(train_data, batch_size=bs, shuffle=shuffle_dataloader)
+    valid_loader = DataLoader(valid_data, batch_size=bs, shuffle=shuffle_dataloader)
+    
+    if shuffle_dataloader: print("Datasets will be shuffled...")
     
     bert_model = AutoModel.from_pretrained(pretrained_bert_name).to(DEVICE)
     
@@ -253,6 +255,7 @@ TRAIN_FUNCS = {
             # Model specific parameters
             "freeze_bert": False,  # NOTE: if true the BERT model is not finetuned
             "dropout_rate": 0.2,
+            "shuffle_dataloader": True,
         }
     ),
     "contrastive": (
@@ -271,6 +274,7 @@ TRAIN_FUNCS = {
             # Model specific parameters
             "freeze_bert": False,  # NOTE: if true the BERT model is not finetuned
             "dropout_rate": 0.2,
+            "shuffle_dataloader": True,
             "is_self_supervised": False,
         }
     ),
@@ -283,15 +287,17 @@ if __name__ == "__main__":
     # Parse the model type first
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--model", choices=TRAIN_FUNCS.keys(), required=True, help="Model type to train")
+        "--model_type",
+        choices=TRAIN_FUNCS.keys(),
+        required=True, help="Model type to train",
+    )
     known_args, unknown_args = parser.parse_known_args()
     # Select the train function and default parameters
     train_func, default_params = TRAIN_FUNCS[known_args.model]
     # Parse the rest of the parameters based on default ones
     parser = argparse.ArgumentParser()
     for param, default in default_params.items():
-        parser.add_argument(
-        f"--{param}", type=type(default), default=default)
+        parser.add_argument(f"--{param}", type=type(default), default=default)
     args = parser.parse_args(unknown_args)
     # Train the model
     train_func(**vars(args))
