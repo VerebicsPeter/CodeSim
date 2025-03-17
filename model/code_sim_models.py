@@ -88,8 +88,8 @@ class ContrastiveCodeSimilarityModel(nn.Module, SimilarityClassifier):
         freeze_bert=False,
         dropout_rate=0.2,
         # MLP hidden sizes and out features
-        mlp_sizes=(512, 256, 128),
-        mlp_feat_out=32,
+        mlp_sizes=(768, 512, 256),
+        mlp_feat_out=256,
     ):
         super().__init__()
         

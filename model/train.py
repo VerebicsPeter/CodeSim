@@ -125,15 +125,22 @@ def train_finetuned(
     )
     model.to(DEVICE)
     
-    loss_func = nn.BCEWithLogitsLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
+    
+   # Training and warmup steps
+    # NOTE: Necessary to take into account Gradient accumulation
+    num_training_steps = (epochs * len(train_loader)) // iters_to_accumulate
+    num_warmup_steps = int(num_training_steps * 0.05)  # 5% warmup
+    
     scheduler = get_linear_schedule_with_warmup(
         optimizer=optimizer,
-        # The number of steps for the warmup phase.
-        num_warmup_steps=0,
         # Necessary to take into account Gradient accumulation
-        num_training_steps=(epochs * len(train_loader)) // iters_to_accumulate
+        num_training_steps=num_training_steps,
+        # The number of steps for the warmup phase.
+        num_warmup_steps=num_warmup_steps,
     )
+    
+    loss_func = nn.BCEWithLogitsLoss()
     
     trainer = code_sim_models.CodeSimilarityTrainer(
         model,
@@ -163,6 +170,8 @@ def train_contrastive(
     shuffle_dataloader = True,
     # Flag for self supervised training
     is_self_supervised = False,
+    # Temperature hyperparameter for NTXent loss
+    temperature=0.5,
 ):
     # function for augmentation
     def minify(code: str) -> str:
@@ -188,7 +197,7 @@ def train_contrastive(
     )
     
     # TODO: don't hardcode this
-    sample_size = 25_000
+    sample_size = 50_000
     dataset = Subset(dataset, list(range(sample_size)))
     
     train_len = int(0.8 * len(dataset))
@@ -215,15 +224,20 @@ def train_contrastive(
         {"params": model.proj.parameters(), "lr": lr_proj, "weight_decay": wd_proj},
     ]
     optimizer = torch.optim.AdamW(param_groups)
+    
+    # Training and warmup steps
+    # NOTE: Necessary to take into account Gradient accumulation
+    num_training_steps = (epochs * len(train_loader)) // iters_to_accumulate
+    num_warmup_steps = int(num_training_steps * 0.05)  # 5% warmup
+    
     scheduler = get_linear_schedule_with_warmup(
         optimizer=optimizer,
+        num_training_steps=num_training_steps,
         # The number of steps for the warmup phase.
-        num_warmup_steps=0,
-        # Necessary to take into account Gradient accumulation
-        num_training_steps=(epochs * len(train_loader)) // iters_to_accumulate
+        num_warmup_steps=num_warmup_steps,
     )
     
-    ntxent_loss = losses.NTXentLoss(temperature=0.5)
+    ntxent_loss = losses.NTXentLoss(temperature=temperature)
     # Wrap the NTXent loss function if needed
     ntxent_loss = losses.SelfSupervisedLoss(ntxent_loss) if is_self_supervised else ntxent_loss
     
@@ -276,6 +290,7 @@ TRAIN_FUNCS = {
             "dropout_rate": 0.2,
             "shuffle_dataloader": True,
             "is_self_supervised": False,
+            "temperature": 0.5,
         }
     ),
 }
