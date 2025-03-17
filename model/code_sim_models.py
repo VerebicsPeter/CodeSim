@@ -115,13 +115,19 @@ class ContrastiveCodeSimilarityModel(nn.Module, SimilarityClassifier):
         mlp_layers.append(nn.Linear(mlp_sizes[2], mlp_feat_out))
         self.proj = nn.Sequential(*mlp_layers)
 
-    def forward(self, inputs: BatchEncoding) -> torch.Tensor:
+    def forward(self, inputs: BatchEncoding, use_proj=True) -> torch.Tensor:
         # Pass through BERT
         output = self.bert(**inputs)
-        output = output.pooler_output  # Use the pooler output
-        # Pass through projection head layers
-        output = self.proj(output)
-        return output
+        # Use the pooler output of BERT
+        output = output.pooler_output
+        # Pass through projection head layers if needed
+        # This is the default behavior, used for training,
+        # because loss is calculated on the projection head's dimension.
+        if use_proj:
+            return self.proj(output)
+        else:
+        # This should be used for downstream tasks, like predicting equivalence.
+            return output
 
     def predict(self, code_a: str|Iterable[str], code_b: str|Iterable[str], threshold=0.5):
         if self.bert_tokenizer is None: self.bert_tokenizer = get_tokenizer(self.bert)
@@ -142,7 +148,7 @@ class ContrastiveCodeSimilarityModel(nn.Module, SimilarityClassifier):
         device = self.bert.device
         for k, v in inputs.items(): inputs[k] = v.to(device)
         
-        outputs = self.forward(inputs)
+        outputs = self.forward(inputs, use_proj=False)
         
         # Calculate the pairwise cosine similarities
         mid = len(codes)//2
