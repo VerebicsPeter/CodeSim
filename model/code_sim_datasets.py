@@ -10,20 +10,19 @@ def get_batch_encodings(
     tokenizer: transformers.PreTrainedTokenizer | transformers.PreTrainedTokenizerFast,
     device: str = "cpu"
 ) -> transformers.BatchEncoding:
-    MAX_LEN = tokenizer.model_max_length
+    MODEL_MAX_LEN = tokenizer.model_max_length
 
     inputs = tokenizer(
         codes,
         truncation=True,
         # Pad to "MAX_LEN + 1" to detect sequences that are too long
-        padding="max_length", max_length=MAX_LEN + 1,
+        padding="max_length", max_length=MODEL_MAX_LEN + 1,
         return_tensors="pt",
     )
 
-    # Mask sequences that are longer than "MAX_LEN"
-    l_mask = inputs["attention_mask"].sum(dim=1) <= MAX_LEN
-
-    inputs = { k: v[l_mask, :MAX_LEN] for k, v in inputs.items() }
+    # Mask out sequences that are longer than `MODEL_MAX_LEN`
+    l_mask = inputs["attention_mask"].sum(dim=1) <= MODEL_MAX_LEN
+    inputs = { k: v[l_mask, :MODEL_MAX_LEN] for k, v in inputs.items() }
     # Move tensors to the specified device
     inputs = { k: v.to(device) for k, v in inputs.items() }
 

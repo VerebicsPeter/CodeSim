@@ -160,8 +160,8 @@ def train_contrastive(
     # Learning rates and weight decays
     lr_bert = 1e-5,
     wd_bert = 1e-4,  # bert often needs smaller weight decay
-    lr_proj = 1e-3,
-    wd_proj = 1e-2,
+    lr_proj = 1e-4,
+    wd_proj = 1e-3,
     bs = 20,  # NOTE: Bigger batch size generally leads to better results in contrastive learning
     iters_to_accumulate = 2,
     # Model specific parameters
@@ -192,13 +192,16 @@ def train_contrastive(
     dataset = cls.from_csv_data(
         path=url,
         tokenizer=tokenizer,
-        aug_funcs=[minify],
+        aug_funcs=[],  #[minify],
         device=DEVICE,
     )
+    print("Initial dataset size:", len(dataset))
     
-    # TODO: don't hardcode this
-    sample_size = 50_000
+    # TODO: don't hardcode this number V
+    sample_size = min(len(dataset), 50_000)
     dataset = Subset(dataset, list(range(sample_size)))
+    
+    print("Sampled dataset size:", len(dataset))
     
     train_len = int(0.8 * len(dataset))
     valid_len = len(dataset) - train_len
@@ -206,7 +209,7 @@ def train_contrastive(
     train_loader = DataLoader(train_data, batch_size=bs, shuffle=shuffle_dataloader)
     valid_loader = DataLoader(valid_data, batch_size=bs, shuffle=shuffle_dataloader)
     
-    if shuffle_dataloader: print("Datasets will be shuffled...")
+    if shuffle_dataloader: print("Dataloaders will be shuffled...")
     
     bert_model = AutoModel.from_pretrained(pretrained_bert_name).to(DEVICE)
     
