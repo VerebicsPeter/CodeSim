@@ -60,7 +60,7 @@ class SimilarityClassifier(Protocol):
         ...
 
 
-class FinetunedCodeSimilarityModel(nn.Module, SimilarityClassifier):
+class CodeSimLinearCLS(nn.Module, SimilarityClassifier):
     def __init__(
         self,
         bert: transformers.BertModel,  # BERT based model instance
@@ -81,9 +81,8 @@ class FinetunedCodeSimilarityModel(nn.Module, SimilarityClassifier):
         output: BaseModelOutputWithPooling = self.bert(**inputs)
         # Pool output
         pooled_output = self.pooling_strat(output, None)
-        pooled_output = self.drop(pooled_output)
-        # Last linear layer
-        logits = self.cls(pooled_output)
+        # Classification layer
+        logits = self.cls(self.drop(pooled_output))
         return logits
     
     def predict(self, code_a: str|Iterable[str], code_b: str|Iterable[str], threshold=0.5):
@@ -104,7 +103,7 @@ class FinetunedCodeSimilarityModel(nn.Module, SimilarityClassifier):
         return pred
 
 
-class FinetunedCodeSimilaritySBERT(nn.Module, SimilarityClassifier):
+class CodeSimSBertTripletCLS(nn.Module, SimilarityClassifier):
     def __init__(
         self,
         bert: transformers.BertModel,  # BERT based model instance
@@ -120,10 +119,7 @@ class FinetunedCodeSimilaritySBERT(nn.Module, SimilarityClassifier):
         self.drop = nn.Dropout(dropout_rate)
 
     def forward(self, inputs: BatchEncoding) -> torch.Tensor:
-        mask = inputs['attention_mask']
-        # Unsqueeze for broadcasting
-        # (needed for masking when pooling)
-        mask = mask.unsqueeze(-1)
+        mask = inputs['attention_mask'].unsqueeze(-1)  # Unsqueeze for broadcasting
         # Pass through BERT
         output: BaseModelOutputWithPooling = self.bert(**inputs)
         # Pool the transformer output
@@ -164,7 +160,61 @@ class FinetunedCodeSimilaritySBERT(nn.Module, SimilarityClassifier):
         return pred
 
 
-class ContrastiveCodeSimilarityModel(nn.Module, SimilarityClassifier):
+class CodeSimSBertLinearCLS(nn.Module):
+    def __init__(
+        self, 
+        bert: transformers.BertModel,
+        freeze_bert=False,
+        dropout_rate=0.2,
+        pooling_strat: PoolingStrategy = cls_pooling_strat,
+    ):
+        super().__init__()
+        if freeze_bert: freeze_model(bert)
+        self.bert = bert
+        self.bert_tokenizer = None
+        self.pooling_strat = pooling_strat
+        self.drop = nn.Dropout(dropout_rate)
+        # Weights for concatenated [ u, v, |u - v| ]
+        self.cls = nn.Linear(3 * bert.config.hidden_size, 1)
+    
+    def forward(self, enc_u: BatchEncoding, enc_v: BatchEncoding):
+        mask_u = enc_u['attention_mask'].unsqueeze(-1)  # Unsqueeze for broadcasting
+        mask_v = enc_v['attention_mask'].unsqueeze(-1)  # Unsqueeze for broadcasting
+        # Pass through BERT
+        u = self.bert(**enc_u)
+        v = self.bert(**enc_v)
+        # Pool the transformer output
+        pooled_u = self.pooling_strat(u, mask_u)
+        pooled_v = self.pooling_strat(v, mask_v)
+        # Construct the feature vector [ u, v, |u - v| ]
+        h = torch.cat([pooled_u, pooled_v, torch.abs(pooled_u - pooled_v)], dim=1)
+        # Classification layer
+        logits = self.cls(self.drop(h))
+        return logits
+
+    def predict(self, code_a: str|Iterable[str], code_b: str|Iterable[str], threshold=0.5):
+        if self.bert_tokenizer is None: self.bert_tokenizer = get_tokenizer(self.bert)
+        
+        params = {
+            "padding":'max_length',  # Pad to max_length
+            "truncation":True,       # Truncate to max_length
+            "return_tensors":'pt'    # Return torch.Tensor objects
+        }
+        
+        enc_u = self.bert_tokenizer(code_a, **params)
+        enc_v = self.bert_tokenizer(code_b, **params)
+        
+        # Put tensors to current device
+        put_batch_encoding_to_device(enc_u, self.bert.device)
+        put_batch_encoding_to_device(enc_v, self.bert.device)
+        
+        logits = self.forward(enc_u, enc_v)
+        
+        pred = (torch.sigmoid(logits.squeeze(-1)) > threshold).int()
+        return pred
+
+
+class CodeSimContrastiveCLS(nn.Module, SimilarityClassifier):
     def __init__(
         self,
         # BERT based model instance
@@ -350,7 +400,7 @@ class CodeSimilarityTrainer(Trainer):
         return train_losses, valid_losses
 
 
-def compute_loss_finetuned_logit(trainer: CodeSimilarityTrainer, batched_data):
+def compute_loss_logit(trainer: CodeSimilarityTrainer, batched_data):
     """Loss strategy for fine tuning BERT using the pooler output."""
     encoding, labels = batched_data
     # Converting to cuda tensors if needed
@@ -364,10 +414,23 @@ def compute_loss_finetuned_logit(trainer: CodeSimilarityTrainer, batched_data):
     return loss
 
 
-def compute_loss_finetuned_SBERT(trainer: CodeSimilarityTrainer, batched_data):
+def compute_loss_SBERT_logit(trainer: CodeSimilarityTrainer, batched_data):
     """Loss strategy for fine tuning BERT using the pooler output."""
-    if not isinstance(trainer.loss_func, torch.nn.TripletMarginLoss):
-        raise ValueError(f"Invalid criteria: {type(trainer.loss_func)}")
+    encoding_u, encoding_v, labels = batched_data
+    # Converting to cuda tensors if needed
+    put_batch_encoding_to_device(encoding_u, trainer.device)
+    put_batch_encoding_to_device(encoding_v, trainer.device)
+    # also convert labels...
+    labels = labels.to(trainer.device)
+    # Obtaining the logits from the model
+    logits = trainer.model(encoding_u, encoding_v)
+    # Computing loss
+    loss = trainer.loss_func(logits.squeeze(-1), labels.float())
+    return loss
+
+
+def compute_loss_SBERT_triplet(trainer: CodeSimilarityTrainer, batched_data):
+    """Loss strategy for fine tuning BERT using the pooler output."""
     encs_a, encs_p, encs_n = batched_data
     # Converting to cuda tensors if needed
     put_batch_encoding_to_device(encs_a, trainer.device)

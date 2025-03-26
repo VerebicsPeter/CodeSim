@@ -20,3 +20,6 @@ paths.ini
 *.csv
 
 .ipynb_checkpoints
+
+# Model state dicts
+*.pt

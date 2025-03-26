@@ -184,6 +184,7 @@ class CodeNetPairDataset(Dataset):
         tokenizer: (
             transformers.PreTrainedTokenizer | transformers.PreTrainedTokenizerFast
         ),
+        return_single_encoding: bool,
     ):
         super().__init__()
         assert len(codes_a) == len(codes_b) == len(labels), "Length MUST match!"
@@ -191,35 +192,55 @@ class CodeNetPairDataset(Dataset):
         self.codes_b = codes_b
         self.labels = labels
         self.tokenizer = tokenizer
+        self.return_single_encoding = return_single_encoding
 
     def __getitem__(self, idx):
         code_a = self.codes_a[idx]
         code_b = self.codes_b[idx]
         label = self.labels[idx]
-        # Encode the sequences for sequence pair classification
-        # ([CLS], code_a tokens , [SEP], code_b tokens, [SEP])
-        encoding = self.tokenizer(
-            code_a, code_b,
-            padding="max_length",  # Pad to max_length
-            max_length=self.tokenizer.model_max_length,
-            truncation=True,  # Truncate to max_length
-            return_tensors="pt",  # Return torch.Tensor objects
-        )
-        # Remove batch dimension
-        encoding = {k: v.squeeze(0) for k, v in encoding.items()}
-
-        return encoding, label
+        
+        if self.return_single_encoding:
+            # Encode the sequences for sequence pair classification
+            # ([CLS], code_a tokens , [SEP], code_b tokens, [SEP])
+            encoding = self.tokenizer(
+                code_a, code_b,
+                padding="max_length",  # Pad to max_length
+                max_length=self.tokenizer.model_max_length,
+                truncation=True,  # Truncate to max_length
+                return_tensors="pt",  # Return torch.Tensor objects
+            )
+            # Remove batch dimension
+            encoding = {k: v.squeeze(0) for k, v in encoding.items()}
+            return encoding, label
+        else:
+            params = {
+                "padding":'max_length',  # Pad to max_length
+                "max_length": self.tokenizer.model_max_length,
+                "truncation":True,       # Truncate to max_length
+                "return_tensors":'pt'    # Return torch.Tensor objects
+            }
+            enc_u = self.tokenizer(code_a, **params)
+            enc_v = self.tokenizer(code_b, **params)
+            # Remove batch dimension
+            enc_u = {k: v.squeeze(0) for k, v in enc_u.items()}
+            enc_v = {k: v.squeeze(0) for k, v in enc_v.items()}
+            return enc_u, enc_v, label
 
     def __len__(self):
         return len(self.labels)
 
     @classmethod
-    def from_pandas_df(cls, df: pd.DataFrame, tokenizer, num_rows=5000):
+    def from_pandas_df(cls, df: pd.DataFrame, tokenizer, num_rows=5000, return_single_encoding: bool = True):
         # Filter sequences that don't fit the model's max length
         def filter_too_long_sequences(row):
-            source = row["src_1"] + row["src_2"]
-            tokens = tokenizer.encode(source, truncation=False)
-            return len(tokens) <= tokenizer.model_max_length
+            if return_single_encoding:
+                source = row["src_1"] + row["src_2"]
+                tokens = tokenizer.encode(source, truncation=False)
+                return len(tokens) <= tokenizer.model_max_length
+            else:
+                u_fits = len(tokenizer.encode(row["src_1"], truncation=False)) <= tokenizer.model_max_length
+                v_fits = len(tokenizer.encode(row["src_2"], truncation=False)) <= tokenizer.model_max_length
+                return u_fits and v_fits
 
         print("Filtering dataset, this might take a while...")
         df = df[df.apply(filter_too_long_sequences, axis=1)]
@@ -230,7 +251,7 @@ class CodeNetPairDataset(Dataset):
         codes_a = df["src_1"].to_list()
         codes_b = df["src_2"].to_list()
         labels = df["label"].to_list()
-        return cls(codes_a, codes_b, labels, tokenizer)
+        return cls(codes_a, codes_b, labels, tokenizer, return_single_encoding)
 
 
 class CodeNetTripletDataset(Dataset):
