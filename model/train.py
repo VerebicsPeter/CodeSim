@@ -312,6 +312,7 @@ TRAIN_FUNCS = {
             "freeze_bert": False,  # NOTE: if true the BERT model is not finetuned
             "dropout_rate": 0.2,
             "shuffle_dataloader": True,
+            "data_type":"paired",
         }
     ),
     "contrastive": (
