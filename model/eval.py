@@ -18,7 +18,8 @@ import model.code_sim_datasets as code_sim_datasets
 
 
 MODEL_TYPES = {
-    "finetuned":  code_sim_models.FinetunedCodeSimilarityModel,
+    "finetuned_logit":  code_sim_models.FinetunedCodeSimilarityModel,
+    "finetuned_sbert":  code_sim_models.FinetunedCodeSimilaritySBERT,
     "contrastive": code_sim_models.ContrastiveCodeSimilarityModel,
 }
 
