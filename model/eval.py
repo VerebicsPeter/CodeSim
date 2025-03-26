@@ -18,8 +18,8 @@ import model.code_sim_datasets as code_sim_datasets
 
 
 MODEL_TYPES = {
-    "contrative": code_sim_models.ContrastiveCodeSimilarityModel,
     "finetuned":  code_sim_models.FinetunedCodeSimilarityModel,
+    "contrastive": code_sim_models.ContrastiveCodeSimilarityModel,
 }
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
