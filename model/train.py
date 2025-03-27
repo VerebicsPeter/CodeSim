@@ -25,8 +25,15 @@ from transformers import (
     get_linear_schedule_with_warmup,
 )
 
-from sklearn.metrics import classification_report
+from sklearn.metrics import classification_report, roc_curve
 
+from model.code_sim_models import (
+    SimilarityClassifier,
+    CodeSimLinearCLS,
+    CodeSimContrastiveCLS,
+    CodeSimSBertLinearCLS,
+    CodeSimSBertTripletCLS,
+)
 import model.code_sim_models as code_sim_models
 import model.code_sim_datasets as code_sim_datasets
 
@@ -74,10 +81,10 @@ def test_forward_passes(pretrained_bert_name: str = "huggingface/CodeBERTa-small
     bert = AutoModel.from_pretrained(pretrained_bert_name).to(DEVICE)
 
     inputs = bert_tokenizer(code, return_tensors="pt", truncation=True, padding=True)
-    model1 = code_sim_models.CodeSimLinearCLS(bert).to(DEVICE)
-    model2 = code_sim_models.CodeSimSBertTripletCLS(bert).to(DEVICE)
-    model3 = code_sim_models.CodeSimContrastiveCLS(bert).to(DEVICE)
-    model4 = code_sim_models.CodeSimSBertLinearCLS(bert).to(DEVICE)
+    model1 = CodeSimLinearCLS(bert).to(DEVICE)
+    model2 = CodeSimSBertTripletCLS(bert).to(DEVICE)
+    model3 = CodeSimContrastiveCLS(bert).to(DEVICE)
+    model4 = CodeSimSBertLinearCLS(bert).to(DEVICE)
 
     emb1 = model1(inputs)
     print("Model 1 output shape:", emb1.shape)
@@ -87,7 +94,7 @@ def test_forward_passes(pretrained_bert_name: str = "huggingface/CodeBERTa-small
 
     emb3 = model3(inputs)
     print("Model 3 output shape:", emb3.shape)
-    
+
     emb4 = model4(inputs, inputs)
     print("Model 4 output shape:", emb4.shape)
 
@@ -97,10 +104,10 @@ def test_predict_passes(pretrained_bert_name: str = "huggingface/CodeBERTa-small
     code_b = """def add(x,y): return x+y"""
 
     bert = AutoModel.from_pretrained(pretrained_bert_name).to(DEVICE)
-    model1 = code_sim_models.CodeSimLinearCLS(bert).to(DEVICE)
-    model2 = code_sim_models.CodeSimSBertTripletCLS(bert).to(DEVICE)
-    model3 = code_sim_models.CodeSimContrastiveCLS(bert).to(DEVICE)
-    model4 = code_sim_models.CodeSimSBertLinearCLS(bert).to(DEVICE)
+    model1 = CodeSimLinearCLS(bert).to(DEVICE)
+    model2 = CodeSimSBertTripletCLS(bert).to(DEVICE)
+    model3 = CodeSimContrastiveCLS(bert).to(DEVICE)
+    model4 = CodeSimSBertLinearCLS(bert).to(DEVICE)
 
     pred1 = model1.predict(code_a, code_b)
     print("Model 1 prediction output:", pred1, "shaped", pred1.shape)
@@ -110,13 +117,14 @@ def test_predict_passes(pretrained_bert_name: str = "huggingface/CodeBERTa-small
 
     pred3 = model3.predict(code_a, code_b)
     print("Model 3 prediction output:", pred3, "shaped", pred3.shape)
-    
+
     pred4 = model4.predict(code_a, code_b)
     print("Model 4 prediction output:", pred4, "shaped", pred4.shape)
 
 
 def Create_CodeNet_paired_dataset(data_path: str, tokenizer, num_rows=5000,
-                                  return_single_encoding=True):
+                                  return_single_encoding=True
+):
     download_dataset(data_path, "dataset.csv")
     df = pd.read_csv(
         "dataset.csv", header=0,
@@ -169,27 +177,29 @@ def train_finetuned(
 ):
     if finetuning_strategy not in FINETUNING_STRATEGIES:
         raise ValueError("Invalid finetuning strategy.")
-    
+
     if finetuning_strategy == "linear_binary_cls":
         model_cls = code_sim_models.CodeSimLinearCLS
         loss_func = nn.BCEWithLogitsLoss()
         loss_hook = code_sim_models.compute_loss_logit
-    
+        evaluator = eval_model
+
     if finetuning_strategy == "sbert_binary_cls":
         model_cls = code_sim_models.CodeSimSBertLinearCLS
         loss_func = nn.BCEWithLogitsLoss()
         loss_hook = code_sim_models.compute_loss_SBERT_logit
-    
+        evaluator = eval_model
+
     if finetuning_strategy == "sbert_triplet_cls":
         model_cls = code_sim_models.CodeSimSBertTripletCLS
         loss_func = nn.TripletMarginWithDistanceLoss(
-            distance_function=lambda x, y: 1 - F.cosine_similarity(x, y),
-            margin=1.0
+            distance_function=lambda x, y: 1 - F.cosine_similarity(x, y), margin=1.0
         )
         loss_hook = code_sim_models.compute_loss_SBERT_triplet
+        evaluator = eval_model_triplet
 
     tokenizer = AutoTokenizer.from_pretrained(pretrained_bert_name)
-    
+
     if finetuning_strategy in {"linear_binary_cls", "sbert_binary_cls"}:
         return_single_encoding = finetuning_strategy == "linear_binary_cls"
         dataset = Create_CodeNet_paired_dataset(
@@ -204,7 +214,7 @@ def train_finetuned(
             tokenizer=tokenizer,
             num_rows=num_rows,
         )
-    
+
     # TODO: Don't hardcode the train split ratio!
     train_len = int(0.8 * len(dataset))
     valid_len = len(dataset) - train_len
@@ -246,17 +256,78 @@ def train_finetuned(
         device=DEVICE,
     )
     trainer.train(epochs=epochs, iters_to_accumulate=iters_to_accumulate)
-    
-    if finetuning_strategy in {"linear_binary_cls", "sbert_binary_cls"}:
-        eval_model(eval_data=valid_data, model=model, threshold=0.5)
-        eval_model(eval_data=valid_data, model=model, threshold=0.6)
-        eval_model(eval_data=valid_data, model=model, threshold=0.7)
-        eval_model(eval_data=valid_data, model=model, threshold=0.8)
-        eval_model(eval_data=valid_data, model=model, threshold=0.9)
+
+    def print_reports(y_true, y_pred):
+        report_1 = classification_report(y_true, [int(pred > 0.5) for pred in y_pred])
+        report_2 = classification_report(y_true, [int(pred > 0.7) for pred in y_pred])
+        report_3 = classification_report(y_true, [int(pred > 0.9) for pred in y_pred])
+        print(report_1)
+        print(report_2)
+        print(report_3)
+
+    y_true, y_pred = evaluator(eval_data=valid_data, model=model)
+
+    fpr, tpr, thresholds = roc_curve(y_true, y_pred)
+    print("FPR", fpr)
+    print("TPR", tpr)
+    print("THRESHS:", thresholds)
+    print("Reports:")
+    print_reports(y_true, y_pred)
+
+
+def eval_finetuned_instance(model: SimilarityClassifier, num_rows=5000):
+    set_seed(42)
+    model.to(DEVICE)
+    tokenizer = code_sim_models.get_tokenizer(model)
+
+    if isinstance(model, CodeSimLinearCLS):
+        dataset = Create_CodeNet_paired_dataset(
+            DATASET_URLS["paired"],
+            tokenizer=tokenizer,
+            num_rows=num_rows,
+            return_single_encoding=True,
+        )
+        evaluator = eval_model
+    elif isinstance(model, CodeSimSBertLinearCLS):
+        dataset = Create_CodeNet_paired_dataset(
+            DATASET_URLS["paired"],
+            tokenizer=tokenizer,
+            num_rows=num_rows,
+            return_single_encoding=False,
+        )
+        evaluator = eval_model
+    elif isinstance(model, CodeSimSBertTripletCLS):
+        dataset = Create_CodeNet_triplet_dataset(
+            DATASET_URLS["triplet"],
+            tokenizer=tokenizer,
+            num_rows=num_rows,
+        )
+        evaluator = eval_model_triplet
     else:
-        eval_model_triplet(eval_data=valid_data, model=model, threshold=0.5)
-        eval_model_triplet(eval_data=valid_data, model=model, threshold=0.7)
-        eval_model_triplet(eval_data=valid_data, model=model, threshold=0.9)
+        raise ValueError(f"Invalid model type. {model.__class__.__name__}")
+
+    # This replicates the split in the training function to create validation set of
+    # unseen data, this could be avoided by pre-splitting the datasets...
+    train_len = int(0.8 * len(dataset))
+    valid_len = len(dataset) - train_len
+    _, valid_data = random_split(dataset, [train_len, valid_len])
+
+    def print_reports(y_true, y_pred):
+        report_1 = classification_report(y_true, [int(pred > 0.5) for pred in y_pred])
+        report_2 = classification_report(y_true, [int(pred > 0.7) for pred in y_pred])
+        report_3 = classification_report(y_true, [int(pred > 0.9) for pred in y_pred])
+        print(report_1)
+        print(report_2)
+        print(report_3)
+
+    y_true, y_pred = evaluator(eval_data=valid_data, model=model)
+
+    fpr, tpr, thresholds = roc_curve(y_true, y_pred)
+    print("FPR", fpr)
+    print("TPR", tpr)
+    print("THRESHS:", thresholds)
+    print("Reports:")
+    print_reports(y_true, y_pred)
 
 
 def train_contrastive(
@@ -318,7 +389,7 @@ def train_contrastive(
 
     bert_model = AutoModel.from_pretrained(pretrained_bert_name).to(DEVICE)
 
-    model = code_sim_models.CodeSimContrastiveCLS(
+    model = CodeSimContrastiveCLS(
         bert_model,
         freeze_bert=freeze_bert,
         dropout_rate=dropout_rate,
@@ -357,7 +428,7 @@ def train_contrastive(
     trainer.train(epochs=epochs, iters_to_accumulate=iters_to_accumulate)
 
 
-def eval_model(eval_data: Subset, model: code_sim_models.SimilarityClassifier, threshold: float):
+def eval_model(eval_data: Subset, model: SimilarityClassifier):
     class RawCodeWrapper(Dataset):
         def __init__(self, subset: Subset):
             # Subset of the original dataset
@@ -373,26 +444,24 @@ def eval_model(eval_data: Subset, model: code_sim_models.SimilarityClassifier, t
 
         def __len__(self):
             return len(self.subset)
-    
+
     dataset = RawCodeWrapper(eval_data)
-    
+
     model.eval()
-    
-    true_labels, predictions = [], []
+
+    y_true, y_pred = [], []
     with torch.no_grad():
-        for (codes1, codes2, labels) in tqdm(DataLoader(dataset, batch_size=20)):
+        for codes1, codes2, labels in tqdm(DataLoader(dataset, batch_size=20)):
             preds = model.predict(codes1, codes2)
             # Store predictions and labels
-            true_labels.extend(labels.cpu().tolist())
-            predictions.extend(preds.cpu().tolist())
-    
-    report = classification_report(true_labels,
-                                   [int(prediction > threshold) for prediction in predictions])
-    print(report)
+            y_true.extend(labels.cpu().tolist())
+            y_pred.extend(preds.cpu().tolist())
+
+    return y_true, y_pred
 
 
-def eval_model_triplet(eval_data: Subset, model: code_sim_models.SimilarityClassifier, threshold: float):
-    class TripletRawCodeWrapper(Dataset):
+def eval_model_triplet(eval_data: Subset, model: SimilarityClassifier):
+    class RawCodeWrapper(Dataset):
         def __init__(self, subset: Subset):
             # Subset of the original dataset
             self.subset = subset
@@ -407,28 +476,27 @@ def eval_model_triplet(eval_data: Subset, model: code_sim_models.SimilarityClass
 
         def __len__(self):
             return len(self.subset)
-    
-    dataset = TripletRawCodeWrapper(eval_data)
-    
+
+    dataset = RawCodeWrapper(eval_data)
+
     model.eval()
-    
-    true_labels, predictions = [], []
+
+    y_true, y_pred = [], []
     with torch.no_grad():
-        for (codes_a, codes_p, codes_n) in tqdm(DataLoader(dataset, batch_size=20)):
+        for codes_a, codes_p, codes_n in tqdm(DataLoader(dataset, batch_size=20)):
             preds_p = model.predict(codes_a, codes_p)
             preds_n = model.predict(codes_a, codes_n)
             # Convert to lists
             preds_p = preds_p.cpu().tolist()
             preds_n = preds_n.cpu().tolist()
             # Store predictions and labels
-            true_labels.extend([1]*len(preds_p))
-            predictions.extend(preds_p)
-            true_labels.extend([0]*len(preds_n))
-            predictions.extend(preds_n)
-    
-    report = classification_report(true_labels,
-                                   [int(prediction > threshold) for prediction in predictions])
-    print(report)
+            y_true.extend([1] * len(preds_p))
+            y_true.extend([0] * len(preds_n))
+            y_pred.extend(preds_p)
+            y_pred.extend(preds_n)
+
+    return y_true, y_pred
+
 
 TRAIN_FUNCS = {
     "finetuned": (
