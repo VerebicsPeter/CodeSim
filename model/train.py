@@ -283,7 +283,7 @@ def train_contrastive(
 
     if is_self_supervised:
         url = DATASET_URLS["contrastive_selfsup"]
-        cls = code_sim_datasets.UnlabeledCodeDataset
+        cls = code_sim_datasets.SelfSupCodeDataset
         ntxent_loss = losses.NTXentLoss(temperature=temperature)
     else:
         url = DATASET_URLS["contrastive_labeled"]
@@ -380,13 +380,14 @@ def eval_model(eval_data: Subset, model: code_sim_models.SimilarityClassifier, t
     
     true_labels, predictions = [], []
     with torch.no_grad():
-        for (srcs1, srcs2, labels) in tqdm(DataLoader(dataset, batch_size=20)):
-            preds = model.predict(srcs1, srcs2, threshold=threshold)
+        for (codes1, codes2, labels) in tqdm(DataLoader(dataset, batch_size=20)):
+            preds = model.predict(codes1, codes2)
             # Store predictions and labels
             true_labels.extend(labels.cpu().tolist())
             predictions.extend(preds.cpu().tolist())
     
-    report = classification_report(true_labels, predictions)
+    report = classification_report(true_labels,
+                                   [int(prediction > threshold) for prediction in predictions])
     print(report)
 
 
@@ -413,19 +414,20 @@ def eval_model_triplet(eval_data: Subset, model: code_sim_models.SimilarityClass
     
     true_labels, predictions = [], []
     with torch.no_grad():
-        for (srcsa, srcsp, srcsn) in tqdm(DataLoader(dataset, batch_size=20)):
-            predsp = model.predict(srcsa, srcsp, threshold=threshold)
-            predsn = model.predict(srcsa, srcsn, threshold=threshold)
+        for (codes_a, codes_p, codes_n) in tqdm(DataLoader(dataset, batch_size=20)):
+            preds_p = model.predict(codes_a, codes_p)
+            preds_n = model.predict(codes_a, codes_n)
             # Convert to lists
-            predsp = predsp.cpu().tolist()
-            predsn = predsn.cpu().tolist()
+            preds_p = preds_p.cpu().tolist()
+            preds_n = preds_n.cpu().tolist()
             # Store predictions and labels
-            true_labels.extend([1]*len(predsp))
-            predictions.extend(predsp)
-            true_labels.extend([0]*len(predsn))
-            predictions.extend(predsn)
+            true_labels.extend([1]*len(preds_p))
+            predictions.extend(preds_p)
+            true_labels.extend([0]*len(preds_n))
+            predictions.extend(preds_n)
     
-    report = classification_report(true_labels, predictions)
+    report = classification_report(true_labels,
+                                   [int(prediction > threshold) for prediction in predictions])
     print(report)
 
 TRAIN_FUNCS = {

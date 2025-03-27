@@ -44,6 +44,7 @@ def freeze_model(model: nn.Module):
 def put_batch_encoding_to_device(encoding: BatchEncoding, device):
     for k, v in encoding.items(): encoding[k] = v.to(device)
 
+
 def get_tokenizer(model: transformers.PreTrainedModel) -> transformers.PreTrainedTokenizerBase:
     if (not model.name_or_path): raise ValueError("Model's name or path is not known.")
     return AutoTokenizer.from_pretrained(model.name_or_path)
@@ -85,7 +86,7 @@ class CodeSimLinearCLS(nn.Module, SimilarityClassifier):
         logits = self.cls(self.drop(pooled_output))
         return logits
     
-    def predict(self, code_a: str|Iterable[str], code_b: str|Iterable[str], threshold=0.5):
+    def predict(self, code_a: str|Iterable[str], code_b: str|Iterable[str]):
         if self.bert_tokenizer is None: self.bert_tokenizer = get_tokenizer(self.bert)
         
         inputs = self.bert_tokenizer(
@@ -98,9 +99,8 @@ class CodeSimLinearCLS(nn.Module, SimilarityClassifier):
         put_batch_encoding_to_device(inputs, self.bert.device)
         
         logits = self.forward(inputs)
-        
-        pred = (torch.sigmoid(logits.squeeze(-1)) > threshold).int()
-        return pred
+        probs = torch.sigmoid(logits.squeeze(-1))
+        return probs
 
 
 class CodeSimSBertTripletCLS(nn.Module, SimilarityClassifier):
@@ -127,7 +127,7 @@ class CodeSimSBertTripletCLS(nn.Module, SimilarityClassifier):
         pooled_output = self.drop(pooled_output)
         return pooled_output
     
-    def predict(self, code_a: str|Iterable[str], code_b: str|Iterable[str], threshold=0.5):
+    def predict(self, code_a: str|Iterable[str], code_b: str|Iterable[str]):
         if self.bert_tokenizer is None: self.bert_tokenizer = get_tokenizer(self.bert)
         
         if isinstance(code_a, str) and isinstance(code_b, str):
@@ -152,15 +152,10 @@ class CodeSimSBertTripletCLS(nn.Module, SimilarityClassifier):
         sim = F.cosine_similarity(outputs[:mid,:],outputs[mid:,:])
         # Scale and shift cosine similarity to [0,1]
         sim = (sim + 1) / 2
-        
-        # TODO:
-        # Add a TRAINABLE sigmoid here with the cosine similarity as an input feature,
-        # scaling and shifting would have to be removed...
-        pred = (sim > threshold).int()
-        return pred
+        return sim
 
 
-class CodeSimSBertLinearCLS(nn.Module):
+class CodeSimSBertLinearCLS(nn.Module, SimilarityClassifier):
     def __init__(
         self, 
         bert: transformers.BertModel,
@@ -192,7 +187,7 @@ class CodeSimSBertLinearCLS(nn.Module):
         logits = self.cls(self.drop(h))
         return logits
 
-    def predict(self, code_a: str|Iterable[str], code_b: str|Iterable[str], threshold=0.5):
+    def predict(self, code_a: str|Iterable[str], code_b: str|Iterable[str]):
         if self.bert_tokenizer is None: self.bert_tokenizer = get_tokenizer(self.bert)
         
         params = {
@@ -203,15 +198,13 @@ class CodeSimSBertLinearCLS(nn.Module):
         
         enc_u = self.bert_tokenizer(code_a, **params)
         enc_v = self.bert_tokenizer(code_b, **params)
-        
         # Put tensors to current device
         put_batch_encoding_to_device(enc_u, self.bert.device)
         put_batch_encoding_to_device(enc_v, self.bert.device)
         
         logits = self.forward(enc_u, enc_v)
-        
-        pred = (torch.sigmoid(logits.squeeze(-1)) > threshold).int()
-        return pred
+        probs = torch.sigmoid(logits.squeeze(-1))
+        return probs
 
 
 class CodeSimContrastiveCLS(nn.Module, SimilarityClassifier):
@@ -258,12 +251,13 @@ class CodeSimContrastiveCLS(nn.Module, SimilarityClassifier):
         # This is the default behavior, used for training,
         # because loss is calculated on the projection head's dimension.
         if use_proj:
-            return self.proj(output)
+            output = self.proj(output)
+            return output
         else:
         # This should be used for downstream tasks, like predicting equivalence.
             return output
 
-    def predict(self, code_a: str|Iterable[str], code_b: str|Iterable[str], threshold=0.5):
+    def predict(self, code_a: str|Iterable[str], code_b: str|Iterable[str]):
         if self.bert_tokenizer is None: self.bert_tokenizer = get_tokenizer(self.bert)
         
         if isinstance(code_a, str) and isinstance(code_b, str):
@@ -288,12 +282,7 @@ class CodeSimContrastiveCLS(nn.Module, SimilarityClassifier):
         sim = F.cosine_similarity(outputs[:mid,:],outputs[mid:,:])
         # Scale and shift cosine similarity to [0,1]
         sim = (sim + 1) / 2
-        
-        # TODO:
-        # Add a TRAINABLE sigmoid here with the cosine similarity as an input feature,
-        # scaling and shifting would have to be removed...
-        pred = (sim > threshold).int()
-        return pred
+        return sim
 
 
 class CodeSimilarityTrainer(Trainer):
@@ -401,7 +390,7 @@ class CodeSimilarityTrainer(Trainer):
 
 
 def compute_loss_logit(trainer: CodeSimilarityTrainer, batched_data):
-    """Loss strategy for fine tuning BERT using the pooler output."""
+    """Loss strategy for fine tuning BERT."""
     encoding, labels = batched_data
     # Converting to cuda tensors if needed
     put_batch_encoding_to_device(encoding, trainer.device)
@@ -415,7 +404,7 @@ def compute_loss_logit(trainer: CodeSimilarityTrainer, batched_data):
 
 
 def compute_loss_SBERT_logit(trainer: CodeSimilarityTrainer, batched_data):
-    """Loss strategy for fine tuning BERT using the pooler output."""
+    """Loss strategy for finetuning BERT."""
     encoding_u, encoding_v, labels = batched_data
     # Converting to cuda tensors if needed
     put_batch_encoding_to_device(encoding_u, trainer.device)
@@ -430,7 +419,7 @@ def compute_loss_SBERT_logit(trainer: CodeSimilarityTrainer, batched_data):
 
 
 def compute_loss_SBERT_triplet(trainer: CodeSimilarityTrainer, batched_data):
-    """Loss strategy for fine tuning BERT using the pooler output."""
+    """Loss strategy for finetuning BERT."""
     encs_a, encs_p, encs_n = batched_data
     # Converting to cuda tensors if needed
     put_batch_encoding_to_device(encs_a, trainer.device)
@@ -443,7 +432,7 @@ def compute_loss_SBERT_triplet(trainer: CodeSimilarityTrainer, batched_data):
 
 
 def compute_loss_contrastive(trainer: CodeSimilarityTrainer, batched_data):
-    """Loss strategy for fine tuning BERT using the pooler output."""
+    """Loss strategy for finetuning BERT."""
     if isinstance(trainer.loss_func, losses.SelfSupervisedLoss):
         ref_input, aug_input = batched_data
         ref_emb = trainer.model(ref_input)
