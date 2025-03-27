@@ -278,7 +278,7 @@ def train_finetuned(
 def eval_finetuned_instance(model: SimilarityClassifier, num_rows=5000):
     set_seed(42)
     model.to(DEVICE)
-    tokenizer = code_sim_models.get_tokenizer(model)
+    tokenizer = code_sim_models.get_tokenizer(model.bert)
 
     if isinstance(model, CodeSimLinearCLS):
         dataset = Create_CodeNet_paired_dataset(
