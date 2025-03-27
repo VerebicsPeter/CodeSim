@@ -9,6 +9,7 @@ from tqdm import tqdm
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import (
     Dataset,
     Subset,
@@ -181,7 +182,10 @@ def train_finetuned(
     
     if finetuning_strategy == "sbert_triplet_cls":
         model_cls = code_sim_models.CodeSimSBertTripletCLS
-        loss_func = nn.TripletMarginLoss(margin=1.0)
+        loss_func = nn.TripletMarginWithDistanceLoss(
+            distance_function=lambda x, y: 1 - F.cosine_similarity(x, y),
+            margin=1.0
+        )
         loss_hook = code_sim_models.compute_loss_SBERT_triplet
 
     tokenizer = AutoTokenizer.from_pretrained(pretrained_bert_name)
@@ -371,7 +375,7 @@ def eval_model(eval_data: Subset, model: code_sim_models.SimilarityClassifier, t
             preds = model.predict(srcs1, srcs2, threshold=threshold)
             # Store predictions and labels
             true_labels.extend(labels.cpu().tolist())
-            predictions.extend(preds.cpu().tolist())    
+            predictions.extend(preds.cpu().tolist())
     
     report = classification_report(true_labels, predictions)
     print(report)
