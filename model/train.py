@@ -266,12 +266,13 @@ def train_finetuned(
         print(report_3)
 
     y_true, y_pred = evaluator(eval_data=valid_data, model=model)
-
+    """
     fpr, tpr, thresholds = roc_curve(y_true, y_pred)
     print("FPR", fpr)
     print("TPR", tpr)
     print("THRESHS:", thresholds)
     print("Reports:")
+    """
     print_reports(y_true, y_pred)
 
 
@@ -321,13 +322,8 @@ def eval_finetuned_instance(model: SimilarityClassifier, num_rows=5000):
         print(report_3)
 
     y_true, y_pred = evaluator(eval_data=valid_data, model=model)
-
-    fpr, tpr, thresholds = roc_curve(y_true, y_pred)
-    print("FPR", fpr)
-    print("TPR", tpr)
-    print("THRESHS:", thresholds)
-    print("Reports:")
     print_reports(y_true, y_pred)
+    return y_true, y_pred
 
 
 def train_contrastive(
