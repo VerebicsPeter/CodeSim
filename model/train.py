@@ -247,7 +247,16 @@ def train_finetuned(
     )
     trainer.train(epochs=epochs, iters_to_accumulate=iters_to_accumulate)
     
-    eval_model(eval_data=valid_data, model=model, threshold=0.5)
+    if finetuning_strategy in {"linear_binary_cls", "sbert_binary_cls"}:
+        eval_model(eval_data=valid_data, model=model, threshold=0.5)
+        eval_model(eval_data=valid_data, model=model, threshold=0.6)
+        eval_model(eval_data=valid_data, model=model, threshold=0.7)
+        eval_model(eval_data=valid_data, model=model, threshold=0.8)
+        eval_model(eval_data=valid_data, model=model, threshold=0.9)
+    else:
+        eval_model_triplet(eval_data=valid_data, model=model, threshold=0.5)
+        eval_model_triplet(eval_data=valid_data, model=model, threshold=0.7)
+        eval_model_triplet(eval_data=valid_data, model=model, threshold=0.9)
 
 
 def train_contrastive(
@@ -376,6 +385,45 @@ def eval_model(eval_data: Subset, model: code_sim_models.SimilarityClassifier, t
             # Store predictions and labels
             true_labels.extend(labels.cpu().tolist())
             predictions.extend(preds.cpu().tolist())
+    
+    report = classification_report(true_labels, predictions)
+    print(report)
+
+
+def eval_model_triplet(eval_data: Subset, model: code_sim_models.SimilarityClassifier, threshold: float):
+    class TripletRawCodeWrapper(Dataset):
+        def __init__(self, subset: Subset):
+            # Subset of the original dataset
+            self.subset = subset
+
+        def __getitem__(self, idx):
+            original_idx = self.subset.indices[idx]
+            return (
+                self.subset.dataset.codes_a[original_idx],
+                self.subset.dataset.codes_p[original_idx],
+                self.subset.dataset.codes_n[original_idx],
+            )
+
+        def __len__(self):
+            return len(self.subset)
+    
+    dataset = TripletRawCodeWrapper(eval_data)
+    
+    model.eval()
+    
+    true_labels, predictions = [], []
+    with torch.no_grad():
+        for (srcsa, srcsp, srcsn) in tqdm(DataLoader(dataset, batch_size=20)):
+            predsp = model.predict(srcsa, srcsp, threshold=threshold)
+            predsn = model.predict(srcsa, srcsn, threshold=threshold)
+            # Convert to lists
+            predsp = predsp.cpu().tolist()
+            predsn = predsn.cpu().tolist()
+            # Store predictions and labels
+            true_labels.extend([1]*len(predsp))
+            predictions.extend(predsp)
+            true_labels.extend([0]*len(predsn))
+            predictions.extend(predsn)
     
     report = classification_report(true_labels, predictions)
     print(report)
