@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.amp import autocast, GradScaler
 from torch.utils.data import DataLoader
-from pytorch_metric_learning import losses
+#from pytorch_metric_learning import losses
 
 # Hugging Face Transformers (CodeBERT etc.)
 import transformers
