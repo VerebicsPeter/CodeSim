@@ -484,8 +484,6 @@ TRAIN_FUNCS = {
             "freeze_bert": False,  # NOTE: if true the BERT model is not finetuned
             "dropout_rate": 0.2,
             "shuffle_dataloader": True,
-            "is_self_supervised": False,
-            "temperature": 0.5,
             "num_rows": 5000,
         },
     ),
