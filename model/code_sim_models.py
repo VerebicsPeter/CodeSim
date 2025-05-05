@@ -122,9 +122,8 @@ class CodeSimSBertTripletCLS(nn.Module, SimilarityClassifier):
         mask = inputs['attention_mask'].unsqueeze(-1)  # Unsqueeze for broadcasting
         # Pass through BERT
         output: BaseModelOutputWithPooling = self.bert(**inputs)
-        # Pool the transformer output
-        pooled_output = self.pooling_strat(output, mask)
-        pooled_output = self.drop(pooled_output)
+        # Pool the BERT output
+        pooled_output = self.drop(self.pooling_strat(output, mask))
         return pooled_output
     
     def predict(self, code_a: str|Iterable[str], code_b: str|Iterable[str]):
@@ -178,7 +177,7 @@ class CodeSimSBertLinearCLS(nn.Module, SimilarityClassifier):
         # Pass through BERT
         u = self.bert(**enc_u)
         v = self.bert(**enc_v)
-        # Pool the transformer output
+        # Pool the BERT output
         pooled_u = self.pooling_strat(u, mask_u)
         pooled_v = self.pooling_strat(v, mask_v)
         # Construct the feature vector [ u, v, |u - v| ]
@@ -207,82 +206,76 @@ class CodeSimSBertLinearCLS(nn.Module, SimilarityClassifier):
         return probs
 
 
-class CodeSimContrastiveCLS(nn.Module, SimilarityClassifier):
+class CodeSimCombinedModel(nn.Module, SimilarityClassifier):
     def __init__(
         self,
-        # BERT based model instance
-        bert: transformers.BertModel,
+        bert: transformers.BertModel,  # BERT based model instance
         freeze_bert=False,
+        pooling_strat: PoolingStrategy = cls_pooling_strat,
+        emb_head_hidden_sizes = (512, 256),
+        emb_head_output_size = 256,
+        cls_head_hidden_sizes = (512, 256),
+        cls_head_num_classes = 2,
         dropout_rate=0.2,
-        # MLP hidden sizes and out features
-        mlp_sizes=(768, 512, 256),
-        mlp_feat_out=256,
     ):
         super().__init__()
         
         if freeze_bert: freeze_model(bert)
         self.bert = bert
         self.bert_tokenizer = None
+        self.pooling_strat = pooling_strat
         
-        # Non linearity
+        # Nonlinearity
         self.relu = nn.ReLU()
         self.drop = nn.Dropout(dropout_rate)
 
-        # MLP 'projection head'
-        assert len(mlp_sizes) == 3, 'MLP must have 3 hidden sizes.'
-        # NOTE: Input size depends on the BERT model
-        mlp_feat_in = bert.config.hidden_size
-        mlp_layers = []
-        mlp_layers.append(nn.Linear(mlp_feat_in, mlp_sizes[0]))
-        mlp_layers.extend([self.relu, self.drop])
-        mlp_layers.append(nn.Linear(mlp_sizes[0], mlp_sizes[1]))
-        mlp_layers.extend([self.relu, self.drop])
-        mlp_layers.append(nn.Linear(mlp_sizes[1], mlp_sizes[2]))
-        mlp_layers.extend([self.relu, self.drop])
-        mlp_layers.append(nn.Linear(mlp_sizes[2], mlp_feat_out))
-        self.proj = nn.Sequential(*mlp_layers)
+        encoder_dim = bert.config.hidden_size        
+        # Projection head for contrastive learning task (for meaningfull embeddings)
+        self.emb_head = self._create_mlp(encoder_dim, *emb_head_hidden_sizes, emb_head_output_size)
+        # Classification head for multiclass tasks
+        # NOTE: input size is 3*encoder_dim, see SBERT classification method for explanation
+        self.cls_head = self._create_mlp(3*encoder_dim, *cls_head_hidden_sizes, cls_head_num_classes)
 
-    def forward(self, inputs: BatchEncoding, use_proj=True) -> torch.Tensor:
+    def _create_mlp(self, in_feats, hidden_size_1, hidden_size_2, out_feats):
+        return nn.Sequential(
+            nn.Linear(in_feats,
+                      hidden_size_1),
+            self.relu,
+            self.drop,
+            nn.Linear(hidden_size_1,
+                      hidden_size_2),
+            self.relu,
+            self.drop,
+            nn.Linear(hidden_size_2,
+                      out_feats),
+        )
+
+    def forward(self, inputs: BatchEncoding) -> torch.Tensor:
+        mask = inputs['attention_mask'].unsqueeze(-1)  # Unsqueeze for broadcasting
         # Pass through BERT
         output = self.bert(**inputs)
-        # Use the pooler output of BERT
-        output = output.pooler_output
-        # Pass through projection head layers if needed
-        # This is the default behavior, used for training,
-        # because loss is calculated on the projection head's dimension.
-        if use_proj:
-            output = self.proj(output)
-            return output
-        else:
-        # This should be used for downstream tasks, like predicting equivalence.
-            return output
+        # Pool the BERT output
+        output = self.drop(self.pooling_strat(output, mask))
+        return output
+
+    def forward_train(self, inputs: BatchEncoding, use_proj=True):
+        """NOTE: Expects stacked a,p,n inputs."""
+        # Pass through embedding projection head layers if needed.
+        # This is the default behavior, used for training, because
+        # loss is calculated on the projection head's dimension.
+        pooled_output = self.forward(inputs)
+        emb_head_output = self.emb_head(pooled_output) if use_proj else pooled_output
+        # Split embeddings into anchor, positive and negative
+        pooled_a, pooled_p, pooled_n = pooled_output.split(pooled_output.shape[0]//3)
+        # Input feature vectors for classifier head
+        h_pos = torch.cat([pooled_a, pooled_p, torch.abs(pooled_a - pooled_p)], dim=1)
+        h_neg = torch.cat([pooled_a, pooled_n, torch.abs(pooled_a - pooled_n)], dim=1)
+        # Logits
+        cls_head_output = self.cls_head(torch.cat([h_pos, h_neg], dim=0))
+        return emb_head_output, cls_head_output
 
     def predict(self, code_a: str|Iterable[str], code_b: str|Iterable[str]):
-        if self.bert_tokenizer is None: self.bert_tokenizer = get_tokenizer(self.bert)
-        
-        if isinstance(code_a, str) and isinstance(code_b, str):
-            codes = [code_a, code_b]
-        else:
-            assert len(code_a) == len(code_b), "Number of paired sequences MUST match!"
-            codes = [*code_a, *code_b]
-        
-        inputs = self.bert_tokenizer(
-            codes,
-            truncation=True,
-            padding="max_length",
-            return_tensors="pt",
-        )
-        # Put tensors to current device
-        put_batch_encoding_to_device(inputs, self.bert.device)
-        
-        outputs = self.forward(inputs, use_proj=False)
-        
-        # Calculate the pairwise cosine similarities
-        mid = len(codes)//2
-        sim = F.cosine_similarity(outputs[:mid,:],outputs[mid:,:])
-        # Scale and shift cosine similarity to [0,1]
-        sim = (sim + 1) / 2
-        return sim
+        raise NotImplementedError()
 
 
 class CodeSimilarityTrainer(Trainer):
@@ -297,7 +290,7 @@ class CodeSimilarityTrainer(Trainer):
         device: torch.device,
     ):
         self.model = model
-        assert len(loaders) == 2, "Please provide train and validation loaders!"
+        assert len(loaders) == 2, "Please provide the training and validation loaders!"
         self.train_loader = loaders[0]
         self.valid_loader = loaders[1]
         self.loss_func = loss_func
@@ -305,18 +298,19 @@ class CodeSimilarityTrainer(Trainer):
         self.optimizer = optimizer
         self.scheduler = scheduler
         self.device = device
-        self.scaler = GradScaler('cuda')
+        self.scaler = GradScaler(self.device)
     
-    def train_epoch(self, iters_to_accumulate: int, print_every: int):
+    def train_step(self, iters_to_accumulate: int, print_every: int):
+        """Train one epoch."""
+        self.model.train()
+        
         sum_loss = 0.0
+        num_iter = len(self.train_loader)
         
         running_loss = 0.0
-        self.model.train()
-
-        num_iter = len(self.train_loader)
         for iter, data in enumerate(tqdm(self.train_loader)):
             # Enables autocasting for the forward pass (model + loss)
-            with autocast('cuda'):
+            with autocast("cuda"):
                 loss = self.loss_hook(self, data)
                 # Normalize the loss because it is averaged
                 loss = loss / iters_to_accumulate
@@ -345,20 +339,22 @@ class CodeSimilarityTrainer(Trainer):
                 sum_loss += running_loss
                 running_loss = 0.0
         
-        # Return the average evaluation loss
+        # Return the average training loss
         avg_loss = sum_loss / num_iter
         return avg_loss
     
-    def validate(self):
+    @torch.no_grad()
+    def valid_step(self):
         """Evaluate the model on validation data."""
         # Set the model to evaluation mode
         self.model.eval()
-        sum_loss, num_iter = 0,0
-        with torch.no_grad():
-            for data in tqdm(self.valid_loader):
-                loss = self.loss_hook(self, data)
-                sum_loss += loss.item()
-                num_iter += 1
+        
+        sum_loss = 0.0
+        num_iter = len(self.valid_loader)
+        for data in tqdm(self.valid_loader):
+            loss = self.loss_hook(self, data)
+            sum_loss += loss.item()
+        
         # Return the average evaluation loss
         avg_loss = sum_loss / num_iter
         return avg_loss
@@ -374,8 +370,8 @@ class CodeSimilarityTrainer(Trainer):
         
         for epoch in range(epochs):
             print(f'EPOCH {epoch + 1}/{epochs}')
-            train_loss = self.train_epoch(iters_to_accumulate, print_every)
-            valid_loss = self.validate()
+            train_loss = self.train_step(iters_to_accumulate, print_every)
+            valid_loss = self.valid_step()
             print(f"EPOCH {epoch + 1}/{epochs} complete. AVG loss: {train_loss}, AVG validation loss: {valid_loss}")
             
             if valid_loss < best_loss:
@@ -387,6 +383,18 @@ class CodeSimilarityTrainer(Trainer):
             train_losses.append(train_loss)
             valid_losses.append(valid_loss)
         return train_losses, valid_losses
+
+
+def Create_CombinedLoss(w_emb=1.0, w_cls=1.0, margin=1.0, distance_function=None):
+    # Use cosine distance as a distance function
+    if distance_function is None: distance_function = lambda x, y: 1 - F.cosine_similarity(x, y)
+    
+    emb_loss = nn.TripletMarginWithDistanceLoss(distance_function=distance_function, margin=margin)
+    cls_loss = nn.CrossEntropyLoss()
+    
+    def combined_loss(emb_a, emb_p, emb_n, logits, labels):
+        return w_emb * emb_loss(emb_a, emb_p, emb_n) + w_cls * cls_loss(logits, labels)
+    return combined_loss
 
 
 def compute_loss_logit(trainer: CodeSimilarityTrainer, batched_data):
@@ -417,7 +425,7 @@ def compute_loss_SBERT_logit(trainer: CodeSimilarityTrainer, batched_data):
     loss = trainer.loss_func(logits.squeeze(-1), labels.float())
     return loss
 
-
+# TODO: maybe stack the inputs
 def compute_loss_SBERT_triplet(trainer: CodeSimilarityTrainer, batched_data):
     """Loss strategy for finetuning BERT."""
     encs_a, encs_p, encs_n = batched_data
@@ -431,14 +439,17 @@ def compute_loss_SBERT_triplet(trainer: CodeSimilarityTrainer, batched_data):
     return trainer.loss_func(embs_a, embs_p, embs_n)
 
 
-def compute_loss_contrastive(trainer: CodeSimilarityTrainer, batched_data):
+def compute_loss_combined(trainer: CodeSimilarityTrainer, batched_data):
     """Loss strategy for finetuning BERT."""
-    if isinstance(trainer.loss_func, losses.SelfSupervisedLoss):
-        ref_input, aug_input = batched_data
-        ref_emb = trainer.model(ref_input)
-        aug_emb = trainer.model(aug_input)
-        return trainer.loss_func(ref_emb, aug_emb)
-    else:
-        inputs, labels = batched_data
-        embeddings = trainer.model(inputs)
-        return trainer.loss_func(embeddings, labels)
+    encs_a, encs_p, encs_n = batched_data
+    #assert encs_a.keys() == encs_p.keys() == encs_n.keys(), "Mismatch in BatchEncoding keys"
+    batch_size = encs_a["input_ids"].shape[0]
+    # create labels for binary classification
+    labels_p = torch.full((batch_size,),1)
+    labels_n = torch.full((batch_size,),0)
+    labels = torch.cat([labels_p,labels_n], dim=0)
+    inputs = { key: torch.cat([encs_a[key], encs_p[key], encs_n[key]]) for key in encs_a.keys()}
+    put_batch_encoding_to_device(inputs, trainer.device)
+    embs, logits = trainer.model.forward_train(inputs)
+    embs_a, embs_p, embs_n = embs.split(embs.shape[0]//3)
+    return trainer.loss_func(embs_a, embs_p, embs_n, logits, labels.to(trainer.device))

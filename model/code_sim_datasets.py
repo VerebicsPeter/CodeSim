@@ -1,8 +1,9 @@
+# Dataset wrappers for CodeNet data
+
 import pandas as pd
 import transformers
-import torch
 from torch.utils.data import Dataset
-from typing import Iterable, Callable
+from typing import Iterable
 
 
 def get_batch_encodings(
@@ -27,121 +28,6 @@ def get_batch_encodings(
     # Move tensors to the specified device
     inputs = {k: v.to(device) for k, v in inputs.items()}
     return inputs
-
-
-class LabeledCodeDataset(Dataset):
-    """Labeled code dataset for code snippets from CodeNet.
-
-    NOTE:
-
-    Solutions from the same problem with "ACCEPTED" status are labeled by the same number.
-    Other solutions are labeled by distinct numbers.
-    """
-
-    def __init__(
-        self,
-        tokenizer: (
-            transformers.PreTrainedTokenizer | transformers.PreTrainedTokenizerFast
-        ),
-        codes: Iterable[str],
-        labels: Iterable[str],
-        device: str,
-    ):
-        assert len(codes) == len(labels)
-        self.inputs = get_batch_encodings(codes, tokenizer, device)
-        self.labels = self._get_numeric_labels(labels)
-
-    def __getitem__(self, idx):
-        input = {k: v[idx] for k, v in self.inputs.items()}
-        label = self.labels[idx]
-        return input, label
-
-    def __len__(self):
-        return self.inputs["input_ids"].shape[0]
-
-    @classmethod
-    def from_csv_data(
-        cls, path: str, tokenizer, aug_funcs: Iterable[Callable], device: str
-    ):
-        def augment(df: pd.DataFrame, *functions):
-            """Calculates data augmentations on a CodeNet sampled dataframe with labeled source code."""
-            # Dataframe to augment (dataframe containing passing CodeNet examples)
-            to_aug = df[df["label"].apply(lambda label: label.endswith("1"))]
-            augs = []
-            for function in functions:
-                aug = to_aug.copy()
-                aug.loc[:, "source"] = aug["source"].apply(function)
-                augs.append(aug)
-            df = pd.concat([df, *augs], ignore_index=True)
-            # Sort the dataframe so matching labels are next to eachother
-            df.sort_values(by="label", inplace=True)
-            return df
-        
-        df = pd.read_csv(path)
-
-        if aug_funcs:
-            print("Augmenting data (this might take a while)...")
-            codes = augment(df, *aug_funcs)
-
-        codes = df["source"]
-        codes = codes.to_list()
-
-        labels = df["label"]
-        labels = labels.to_list()
-        
-        print(df.shape)
-
-        return cls(tokenizer, codes, labels, device)
-    
-    def _get_numeric_labels(labels: Iterable[str]) -> torch.Tensor:
-        """Transform string labels to int labels for the NTXent loss function."""
-        pos_labels = [label for label in labels if label.endswith("1")]
-        labels_map = {label: i for i, label in enumerate(sorted(set(pos_labels)))}
-        int_labels = torch.Tensor([labels_map.get(label, -1) for label in labels])
-        neg_indices = (int_labels == -1).nonzero(as_tuple=True)[0]
-        M = max(int_labels)
-        int_labels[neg_indices] = torch.arange(M + 1, M + 1 + len(neg_indices))
-        return int_labels
-
-
-class SelfSupCodeDataset(Dataset):
-    def __init__(
-        self,
-        tokenizer: (
-            transformers.PreTrainedTokenizer | transformers.PreTrainedTokenizerFast
-        ),
-        ref_codes: Iterable[str],
-        aug_codes: Iterable[str],
-        device: str,
-    ):
-        assert len(ref_codes) == len(aug_codes)
-        self.ref_inputs = get_batch_encodings(ref_codes, tokenizer, device)
-        self.aug_inputs = get_batch_encodings(aug_codes, tokenizer, device)
-
-    def __getitem__(self, idx):
-        # Return both reference and augmented code inputs for a given index
-        ref_input = {k: v[idx] for k, v in self.ref_inputs.items()}
-        aug_input = {k: v[idx] for k, v in self.aug_inputs.items()}
-        return ref_input, aug_input
-
-    def __len__(self):
-        return self.ref_inputs["input_ids"].shape[0]
-
-    @classmethod
-    def from_csv_data(
-        cls, path: str, tokenizer, aug_funcs: Iterable[Callable], device: str
-    ):
-        df = pd.read_csv(path)
-        print(df.shape)
-
-        ref_codes = df["file_content"]
-        ref_codes = ref_codes.to_list()
-
-        aug_codes = df["file_content"].apply(aug_funcs[0])
-        aug_codes = aug_codes.to_list()
-        # TODO: multiple augmentations
-
-        return cls(tokenizer, ref_codes, aug_codes, device)
 
 
 class CodeNetPairDataset(Dataset):
