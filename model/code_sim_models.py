@@ -416,10 +416,10 @@ class CodeSimilarityTrainer(Trainer):
                 
                 logits_p = cls_model.forward(embs_a, embs_p); labels_p = torch.full((batch_size,),1)
                 logits_n = cls_model.forward(embs_a, embs_n); labels_n = torch.full((batch_size,),0)
-                logits = torch.cat(logits_p, logits_n.to(self.device), dim=0)
-                labels = torch.cat(labels_p, labels_n.to(self.device), dim=0)
+                logits = torch.cat([logits_p, logits_n], dim=0)
+                labels = torch.cat([labels_p, labels_n], dim=0)
                 
-                loss = cls_loss(logits, labels)
+                loss = cls_loss(logits, labels.to(self.device))
                 loss.backward()
                 cls_optim.step()
                 total_loss += loss.item()
