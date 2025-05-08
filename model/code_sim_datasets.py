@@ -1,9 +1,30 @@
 # Dataset wrappers for CodeNet data
-
+import gdown
 import pandas as pd
+import pprint as pp
 import transformers
 from torch.utils.data import Dataset
 from typing import Iterable
+
+
+DATASET_TYPE = {
+    "paired",
+    "triplet",
+}
+
+# TODO: Create proper dataset with train, validation, evalualion splits for clean evaluation,
+# idea: pick a set of 'evaluation' problems distinct from training and validation problems
+# TODO: Maybe load URLS from a .env or something
+DATASET_URLS = {
+    "paired" : "https://drive.google.com/uc?export=download&id=1pUErbyZw1fBC5gIe6KT7BWga7h6Bfr4l",
+    "triplet": "https://drive.google.com/uc?export=download&id=11aBIxIMEMKoGyJ9IdUHY2XQv1ZzfyXd2",
+    # NOTE: Old datasets
+    #"contrastive_labeled"  : "https://drive.google.com/uc?export=download&id=1UteITBYXcBLt2hXviy71jQr-oXceVcs5",
+    #"contrastive_unlabeled": "https://drive.google.com/uc?export=download&id=1iHHgOcJQ_qp3sk3d7w1zpWBvsgDqrPJV",
+}
+
+def download_dataset(url, output_file):
+    gdown.download(url, output_file, quiet=False)
 
 
 def get_batch_encodings(
@@ -213,3 +234,47 @@ class CodeNetTripletDataset(Dataset):
         codes_p = df["src_p"].to_list()
         codes_n = df["src_n"].to_list()
         return cls(codes_a, codes_p, codes_n, tokenizer)
+
+
+def Create_CodeNet_paired_dataset(
+    tokenizer,
+    data_path=DATASET_URLS["paired"],
+    num_rows=5000,
+    return_single_encoding=True
+):
+    download_dataset(data_path, "dataset.csv")
+    df = pd.read_csv(
+        "dataset.csv", header=0,
+        names=CodeNetPairDataset.COLUMNS
+    )
+    print("CodeNet data loaded. Data type: paired")
+    pp.pp(df)
+
+    dataset = CodeNetPairDataset.from_pandas_df(
+        df,
+        tokenizer=tokenizer,
+        num_rows=num_rows,
+        return_single_encoding=return_single_encoding,
+    )
+    return dataset
+
+
+def Create_CodeNet_triplet_dataset(
+    tokenizer,
+    data_path=DATASET_URLS["triplet"],
+    num_rows=5000,
+):
+    download_dataset(data_path, "dataset.csv")
+    df = pd.read_csv(
+        "dataset.csv", header=0,
+        names=CodeNetTripletDataset.COLUMNS
+    )
+    print("CodeNet data loaded. Data type: triplet")
+    pp.pp(df)
+
+    dataset = CodeNetTripletDataset.from_pandas_df(
+        df,
+        tokenizer=tokenizer,
+        num_rows=num_rows, 
+    )
+    return dataset
