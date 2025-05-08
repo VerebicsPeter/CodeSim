@@ -406,8 +406,7 @@ def eval_model_triplet(eval_data, enc_model: CodeSimSBertTripletENC, cls_model: 
 
     y_true, y_pred = [], []
     with torch.no_grad():
-        for iter, data in tqdm(DataLoader(eval_data, batch_size=20)):
-            encs_a, encs_p, encs_n = data
+        for encs_a, encs_p, encs_n in tqdm(DataLoader(eval_data, batch_size=20)):
             code_sim_models.put_batch_encoding_to_device(encs_a, DEVICE)
             code_sim_models.put_batch_encoding_to_device(encs_p, DEVICE)
             code_sim_models.put_batch_encoding_to_device(encs_n, DEVICE)
