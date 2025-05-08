@@ -281,9 +281,10 @@ def finetune_model_triplet(
     )
     trainer.train(epochs=epochs, iters_to_accumulate=iters_to_accumulate)
     
-    
+    CLS_MODEL_PATH = "best_cls_model.pth"
     cls_model = trainer.train_cls_head(epochs=epochs, lr=lr_cls, weight_decay=wd_cls)
     y_true, y_pred = eval_model_triplet(eval_data=valid_data, cls_model=cls_model, enc_model=enc_model)
+    torch.save(cls_model.state_dict(), CLS_MODEL_PATH)
     print_reports(y_true, y_pred)
 
 
