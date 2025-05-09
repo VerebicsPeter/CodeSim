@@ -86,6 +86,7 @@ class CodeSimLinearCLS(nn.Module, SimilarityClassifier):
         logits = self.cls(self.drop(pooled_output))
         return logits
     
+    @torch.no_grad()
     def predict(self, code_a: str|Iterable[str], code_b: str|Iterable[str]):
         if self.bert_tokenizer is None: self.bert_tokenizer = get_tokenizer(self.bert)
         
@@ -126,6 +127,33 @@ class CodeSimSBertTripletENC(nn.Module):
         pooled_output = self.drop(self.pooling_strat(output, mask))
         return pooled_output
 
+    @torch.no_grad()
+    def predict(self, code_a: str|Iterable[str], code_b: str|Iterable[str], threshold=1.0):
+        if self.bert_tokenizer is None: self.bert_tokenizer = get_tokenizer(self.bert)
+        
+        if isinstance(code_a, str) and isinstance(code_b, str):
+            codes = [code_a, code_b]
+        else:
+            assert len(code_a) == len(code_b), "Number of paired sequences MUST match!"
+            codes = [*code_a, *code_b]
+        
+        inputs = self.bert_tokenizer(
+            codes,
+            truncation=True,
+            padding="max_length",
+            return_tensors="pt",
+        )
+        # Put tensors to current device
+        put_batch_encoding_to_device(inputs, self.bert.device)
+        
+        outputs = self.forward(inputs)
+        
+        distance_function = lambda x, y: 1 - F.cosine_similarity(x, y)
+        # Calculate the pairwise cosine distances
+        mid = len(codes)//2
+        dst = distance_function(outputs[:mid,:], outputs[mid:,:])
+        return (dst > threshold).int()
+
 
 class CodeSimSBertTripletCLS(nn.Module, SimilarityClassifier):
     def __init__(self, embedding_size, hidden_sizes=(512,256), num_classes=2, dropout=0.2):
@@ -151,6 +179,7 @@ class CodeSimSBertTripletCLS(nn.Module, SimilarityClassifier):
         logits = self.cls_head(h)
         return logits
 
+    @torch.no_grad()
     def predict(self, code_a: str|Iterable[str], code_b: str|Iterable[str]):
         raise NotImplementedError()
 
@@ -187,6 +216,7 @@ class CodeSimSBertLinearCLS(nn.Module, SimilarityClassifier):
         logits = self.cls(self.drop(h))
         return logits
 
+    @torch.no_grad()
     def predict(self, code_a: str|Iterable[str], code_b: str|Iterable[str]):
         if self.bert_tokenizer is None: self.bert_tokenizer = get_tokenizer(self.bert)
         

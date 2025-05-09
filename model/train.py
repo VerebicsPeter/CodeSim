@@ -369,6 +369,56 @@ def finetune_model_combined(
     # TODO: Evaluation logic here
 
 
+
+def eval(model, num_rows=5000, threshold=1.0):
+    model.to(DEVICE)
+    
+    set_seed(42)
+    tokenizer = code_sim_models.get_tokenizer(model.bert)
+
+    if isinstance(model, CodeSimLinearCLS):
+        dataset = code_sim_datasets.Create_CodeNet_paired_dataset(
+            tokenizer=tokenizer,
+            num_rows=num_rows,
+            return_single_encoding=True,
+        )
+        evaluator = eval_model
+    elif isinstance(model, CodeSimSBertLinearCLS):
+        dataset = code_sim_datasets.Create_CodeNet_paired_dataset(
+            tokenizer=tokenizer,
+            num_rows=num_rows,
+            return_single_encoding=False,
+        )
+        evaluator = eval_model
+    elif isinstance(model, CodeSimSBertTripletCLS):
+        dataset = code_sim_datasets.Create_CodeNet_triplet_dataset(
+            tokenizer=tokenizer,
+            num_rows=num_rows,
+        )
+        evaluator = eval_model_triplet
+    elif isinstance(model, CodeSimSBertTripletENC):
+        dataset = code_sim_datasets.Create_CodeNet_triplet_dataset(
+            tokenizer=tokenizer,
+            num_rows=num_rows,
+        )
+        evaluator = lambda eval_data, model : eval_model_triplet_threshold(
+            eval_data, model,
+            threshold=threshold,
+        )
+    else:
+        raise ValueError(f"Invalid model type. {model.__class__.__name__}")
+
+    # NOTE, TODO This replicates the split in the training function to create validation set of
+    # unseen data, this could be avoided by pre-splitting the datasets...
+    train_len = int(0.8 * len(dataset))
+    valid_len = len(dataset) - train_len
+    _, valid_data = random_split(dataset, [train_len, valid_len])
+    
+    y_true, y_pred = evaluator(eval_data=valid_data, model=model)
+    print_reports(y_true, y_pred)
+    return y_true, y_pred
+
+
 def eval_model(eval_data: Subset, model: SimilarityClassifier):
     class RawCodeWrapper(Dataset):
         def __init__(self, subset: Subset):
@@ -404,7 +454,6 @@ def eval_model(eval_data: Subset, model: SimilarityClassifier):
 def eval_model_triplet(eval_data, enc_model: CodeSimSBertTripletENC, cls_model: CodeSimSBertTripletCLS):
     enc_model.eval()
     cls_model.eval()
-
     y_true, y_pred = [], []
     with torch.no_grad():
         for encs_a, encs_p, encs_n in tqdm(DataLoader(eval_data, batch_size=20)):
@@ -416,6 +465,44 @@ def eval_model_triplet(eval_data, enc_model: CodeSimSBertTripletENC, cls_model: 
             embs_n = enc_model(encs_n)  # negative
             preds_p = cls_model.forward(embs_a, embs_p).argmax(dim=1).long()
             preds_n = cls_model.forward(embs_a, embs_n).argmax(dim=1).long()
+            # Convert to lists
+            preds_p = preds_p.cpu().tolist()
+            preds_n = preds_n.cpu().tolist()
+            # Store predictions and labels
+            y_true.extend([1] * len(preds_p))
+            y_true.extend([0] * len(preds_n))
+            y_pred.extend(preds_p)
+            y_pred.extend(preds_n)
+
+    return y_true, y_pred
+
+
+def eval_model_triplet_threshold(eval_data: Subset, model, threshold=1.0):
+    class RawCodeWrapper(Dataset):
+        def __init__(self, subset: Subset):
+            # Subset of the original dataset
+            self.subset = subset
+
+        def __getitem__(self, idx):
+            original_idx = self.subset.indices[idx]
+            return (
+                self.subset.dataset.codes_a[original_idx],
+                self.subset.dataset.codes_p[original_idx],
+                self.subset.dataset.codes_n[original_idx],
+            )
+
+        def __len__(self):
+            return len(self.subset)
+
+    dataset = RawCodeWrapper(eval_data)
+
+    model.eval()
+
+    y_true, y_pred = [], []
+    with torch.no_grad():
+        for codes_a, codes_p, codes_n in tqdm(DataLoader(dataset, batch_size=20)):
+            preds_p = model.predict(codes_a, codes_p, threshold=threshold)
+            preds_n = model.predict(codes_a, codes_n, threshold=threshold)
             # Convert to lists
             preds_p = preds_p.cpu().tolist()
             preds_n = preds_n.cpu().tolist()
