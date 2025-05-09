@@ -401,10 +401,7 @@ def eval(model, num_rows=5000, threshold=1.0):
             tokenizer=tokenizer,
             num_rows=num_rows,
         )
-        evaluator = lambda eval_data, model : eval_model_triplet_threshold(
-            eval_data, model,
-            threshold=threshold,
-        )
+        evaluator = eval_model_triplet_simpl
     else:
         raise ValueError(f"Invalid model type. {model.__class__.__name__}")
 
@@ -477,7 +474,7 @@ def eval_model_triplet(eval_data, enc_model: CodeSimSBertTripletENC, cls_model: 
     return y_true, y_pred
 
 
-def eval_model_triplet_threshold(eval_data: Subset, model, threshold=1.0):
+def eval_model_triplet_simpl(eval_data: Subset, model):
     class RawCodeWrapper(Dataset):
         def __init__(self, subset: Subset):
             # Subset of the original dataset
@@ -501,8 +498,8 @@ def eval_model_triplet_threshold(eval_data: Subset, model, threshold=1.0):
     y_true, y_pred = [], []
     with torch.no_grad():
         for codes_a, codes_p, codes_n in tqdm(DataLoader(dataset, batch_size=20)):
-            preds_p = model.predict(codes_a, codes_p, threshold=threshold)
-            preds_n = model.predict(codes_a, codes_n, threshold=threshold)
+            preds_p = model.predict(codes_a, codes_p)
+            preds_n = model.predict(codes_a, codes_n)
             # Convert to lists
             preds_p = preds_p.cpu().tolist()
             preds_n = preds_n.cpu().tolist()

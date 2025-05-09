@@ -128,7 +128,7 @@ class CodeSimSBertTripletENC(nn.Module):
         return pooled_output
 
     @torch.no_grad()
-    def predict(self, code_a: str|Iterable[str], code_b: str|Iterable[str], threshold=1.0):
+    def predict(self, code_a: str|Iterable[str], code_b: str|Iterable[str]):
         if self.bert_tokenizer is None: self.bert_tokenizer = get_tokenizer(self.bert)
         
         if isinstance(code_a, str) and isinstance(code_b, str):
@@ -152,7 +152,10 @@ class CodeSimSBertTripletENC(nn.Module):
         # Calculate the pairwise cosine distances
         mid = len(codes)//2
         dst = distance_function(outputs[:mid,:], outputs[mid:,:])
-        return (dst > threshold).int()
+        return dst/2 # This is inside [0,1]
+        # Alternative
+        #threshold=1.0
+        #return (dst < threshold).int()
 
 
 class CodeSimSBertTripletCLS(nn.Module, SimilarityClassifier):
