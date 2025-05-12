@@ -182,6 +182,8 @@ def finetune_model(
         bert_model,
         freeze_bert=freeze_bert,
         dropout_rate=dropout_rate,
+        pooling_strat=code_sim_models.AttentionPooler(encoder_dim=bert_model.conifg.hidden_size,
+                                                      attention_dim=bert_model.conifg.hidden_size)
     )
     model.to(DEVICE)
 
@@ -369,8 +371,7 @@ def finetune_model_combined(
     # TODO: Evaluation logic here
 
 
-
-def eval(model, num_rows=5000, threshold=1.0):
+def eval(model, num_rows=5000):
     model.to(DEVICE)
     
     set_seed(42)

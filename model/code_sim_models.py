@@ -18,23 +18,46 @@ from tqdm.auto import tqdm
 
 from typing import Callable, Iterable, Protocol, Tuple
 
-# NOTE: Pooling strategy is supposed to return a pooled output based on the output of a transformer, this could be the:
+# NOTE: Pooling strategy returns a pooled output based on the output of a transformer, this could be the:
 # - `pooler_output` which is the embedding of the CLS token in BERT models,
 # - a mean pooled version of the last hidden states
-# - a max  pooled version of the last hidden states
+# - a max pooled version of the last hidden states
+# - an attention pooled version of the last hidden states
 PoolingStrategy = Callable[[BaseModelOutputWithPooling, torch.Tensor], torch.Tensor]
 
-# TODO: maybe make mask tensor optional
-def cls_pooling_strat(output: BaseModelOutputWithPooling, mask: torch.Tensor):
+
+def cls_pooling_strat(output: BaseModelOutputWithPooling, *_):
     return output.pooler_output
+
 
 def max_pooling_strat(output: BaseModelOutputWithPooling, mask: torch.Tensor):
     pooled_output = output.last_hidden_state * mask  # mask out irrelevant embeddings
     return pooled_output.max(dim=1).values
 
+
 def mean_pooling_strat(output: BaseModelOutputWithPooling, mask: torch.Tensor):
     pooled_output = output.last_hidden_state * mask  # mask out irrelevant embeddings
     return pooled_output.mean(dim=1)
+
+
+class AttentionPooler(nn.Module):
+    def __init__(self, encoder_dim, attention_dim):
+        self.attention = nn.Sequential(
+            nn.Linear(encoder_dim,
+                      attention_dim),
+            nn.Tanh(),
+            nn.Linear(attention_dim, 1)
+        )
+    
+    def forward(self, outputs: BaseModelOutputWithPooling, mask: torch.Tensor):
+        mask = mask.squeeze(-1)  # remove unnecessary 1 dim
+        # get attention scores using learnable weights
+        attn_scores = self.attention(outputs).squeeze(-1)
+        # mask attention scores with '-inf', softmax turns them to 0...
+        attn_scores = attn_scores.masked_fill(mask==0, float("-inf"))
+        attn_weights = F.softmax(attn_scores, dim=1).unsqueeze(-1)
+        # Return the weighted representation
+        return (outputs * attn_weights).sum(dim=1)
 
 
 def freeze_model(model: nn.Module):
@@ -153,9 +176,6 @@ class CodeSimSBertTripletENC(nn.Module):
         mid = len(codes)//2
         dst = distance_function(outputs[:mid,:], outputs[mid:,:])
         return dst/2 # This is inside [0,1]
-        # Alternative
-        #threshold=1.0
-        #return (dst < threshold).int()
 
 
 class CodeSimSBertTripletCLS(nn.Module, SimilarityClassifier):
@@ -517,7 +537,6 @@ def compute_loss_triplet(trainer: CodeSimilarityTrainer, batched_data):
 def compute_loss_combined(trainer: CodeSimilarityTrainer, batched_data):
     """Loss strategy for finetuning BERT."""
     encs_a, encs_p, encs_n = batched_data
-    #assert encs_a.keys() == encs_p.keys() == encs_n.keys(), "Mismatch in BatchEncoding keys"
     batch_size = encs_a["input_ids"].shape[0]
     # create labels for binary classification
     labels_p = torch.full((batch_size,),1)
