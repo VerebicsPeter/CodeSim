@@ -42,6 +42,7 @@ def mean_pooling_strat(output: BaseModelOutputWithPooling, mask: torch.Tensor):
 
 class AttentionPooler(nn.Module):
     def __init__(self, encoder_dim, attention_dim):
+        super().__init__()
         self.attention = nn.Sequential(
             nn.Linear(encoder_dim,
                       attention_dim),
