@@ -182,8 +182,8 @@ def finetune_model(
         bert_model,
         freeze_bert=freeze_bert,
         dropout_rate=dropout_rate,
-        pooling_strat=code_sim_models.AttentionPooler(encoder_dim=bert_model.conifg.hidden_size,
-                                                      attention_dim=bert_model.conifg.hidden_size)
+        pooling_strat=code_sim_models.AttentionPooler(encoder_dim=bert_model.config.hidden_size,
+                                                      attention_dim=bert_model.config.hidden_size)
     )
     model.to(DEVICE)
 
