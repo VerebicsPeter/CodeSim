@@ -50,15 +50,15 @@ class AttentionPooler(nn.Module):
             nn.Linear(attention_dim, 1)
         )
     
-    def forward(self, outputs: BaseModelOutputWithPooling, mask: torch.Tensor):
+    def forward(self, output: BaseModelOutputWithPooling, mask: torch.Tensor):
         mask = mask.squeeze(-1)  # remove unnecessary 1 dim
         # get attention scores using learnable weights
-        attn_scores = self.attention(outputs).squeeze(-1)
+        attn_scores = self.attention(output.last_hidden_state).squeeze(-1)
         # mask attention scores with '-inf', softmax turns them to 0...
         attn_scores = attn_scores.masked_fill(mask==0, float("-inf"))
         attn_weights = F.softmax(attn_scores, dim=1).unsqueeze(-1)
         # Return the weighted representation
-        return (outputs * attn_weights).sum(dim=1)
+        return (output.last_hidden_state * attn_weights).sum(dim=1)
 
 
 def freeze_model(model: nn.Module):
@@ -102,10 +102,11 @@ class CodeSimLinearCLS(nn.Module, SimilarityClassifier):
         self.cls = nn.Linear(self.bert.config.hidden_size, 1)
 
     def forward(self, inputs: BatchEncoding) -> torch.Tensor:
+        mask = inputs['attention_mask'].unsqueeze(-1)  # Unsqueeze for broadcasting
         # Pass through BERT
         output: BaseModelOutputWithPooling = self.bert(**inputs)
         # Pool output
-        pooled_output = self.pooling_strat(output, None)
+        pooled_output = self.pooling_strat(output, mask)
         # Classification layer
         logits = self.cls(self.drop(pooled_output))
         return logits

@@ -64,7 +64,7 @@ def test_forward_passes(pretrained_bert_name: str = "huggingface/CodeBERTa-small
     inputs_p = bert_tokenizer(code_p, **params)
     inputs_n = bert_tokenizer(code_n, **params)
     
-    model1 = CodeSimLinearCLS(bert).to(DEVICE)
+    model1 = CodeSimLinearCLS(bert, pooling_strat=code_sim_models.AttentionPooler(768,768)).to(DEVICE)
     model2 = CodeSimSBertLinearCLS(bert).to(DEVICE)
     model3 = CodeSimSBertTripletENC(bert).to(DEVICE)
     model4 = CodeSimCombinedModel(bert).to(DEVICE)
