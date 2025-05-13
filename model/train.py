@@ -94,7 +94,7 @@ def test_forward_passes(pretrained_bert_name: str = "huggingface/CodeBERTa-small
 def print_reports(y_true, y_pred, thresholds=(.5,.7,.9)):
     
     for threshold in thresholds:
-        report = classification_report(y_true, [int(pred > thresholds) for pred in y_pred])
+        report = classification_report(y_true, [int(pred > threshold) for pred in y_pred])
         print(f"REPORT @ threshold={threshold}")
         print(report)
     
