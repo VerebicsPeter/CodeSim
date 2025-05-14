@@ -240,10 +240,6 @@ def finetune_model_triplet(
         bert_model,
         freeze_bert=freeze_bert,
         dropout_rate=dropout_rate,
-        pooling_strat=code_sim_models.AttentionPooler(
-            bert_dim=bert_model.config.hidden_size,
-            attn_dim=bert_model.config.hidden_size
-        )
     )
     enc_model.to(DEVICE)
 
@@ -380,7 +376,7 @@ def eval_model_classifier(eval_data: DataLoader,
                           model: CodeSimLinearCLS | CodeSimSBertLinearCLS):
     model.eval()
     y_true, y_pred = [], []
-    for data in eval_data:
+    for data in tqdm(eval_data):
         if isinstance(model, CodeSimLinearCLS):
             encs, labels = data
             code_sim_models.put_batch_encoding_to_device(encs, model.bert.device)
@@ -402,7 +398,7 @@ def eval_model_triplet_simpl(eval_data: DataLoader,
                              model: CodeSimSBertTripletENC):
     model.eval()
     y_true, y_pred = [], []
-    for data in eval_data:
+    for data in tqdm(eval_data):
         encs_a, encs_p, encs_n = data
         batch_size = encs_a["input_ids"].shape[0]
         inputs = {key: torch.cat([encs_a[key], encs_p[key], encs_n[key]]) for key in encs_a}
@@ -430,7 +426,7 @@ def eval_model_triplet_chead(eval_data: DataLoader,
     enc_model.eval()
     cls_model.eval()
     y_true, y_pred = [], []
-    for data in tqdm(DataLoader(eval_data, batch_size=20)):
+    for data in tqdm(eval_data):
         encs_a, encs_p, encs_n = data
         batch_size = encs_a["input_ids"].shape[0]
         inputs = {key: torch.cat([encs_a[key], encs_p[key], encs_n[key]]) for key in encs_a}
