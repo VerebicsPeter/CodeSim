@@ -2,9 +2,11 @@
 import gdown
 import pandas as pd
 import pprint as pp
+import random
 import transformers
 from torch.utils.data import Dataset
 from typing import Iterable
+from collections import defaultdict
 
 
 DATASET_TYPE = {
@@ -66,6 +68,7 @@ class CodeNetPairDataset(Dataset):
 
     def __init__(
         self,
+        pids,
         codes_a,
         codes_b,
         labels,
@@ -76,10 +79,17 @@ class CodeNetPairDataset(Dataset):
     ):
         super().__init__()
         assert len(codes_a) == len(codes_b) == len(labels), "Length MUST match!"
+        self.pids = pids
         self.codes_a = codes_a
         self.codes_b = codes_b
         self.labels = labels
         self.tokenizer = tokenizer
+        self.tokenizer_params = {
+            "padding":'max_length',  # Pad to max_length
+            "max_length": self.tokenizer.model_max_length,
+            "truncation":True,       # Truncate to max_length
+            "return_tensors":'pt'    # Return torch.Tensor objects
+        }
         self.return_single_encoding = return_single_encoding
 
     def __getitem__(self, idx):
@@ -90,25 +100,13 @@ class CodeNetPairDataset(Dataset):
         if self.return_single_encoding:
             # Encode the sequences for sequence pair classification
             # ([CLS], code_a tokens , [SEP], code_b tokens, [SEP])
-            encoding = self.tokenizer(
-                code_a, code_b,
-                padding="max_length",  # Pad to max_length
-                max_length=self.tokenizer.model_max_length,
-                truncation=True,  # Truncate to max_length
-                return_tensors="pt",  # Return torch.Tensor objects
-            )
+            encoding = self.tokenizer(code_a, code_b, **self.tokenizer_params)
             # Remove batch dimension
             encoding = {k: v.squeeze(0) for k, v in encoding.items()}
             return encoding, label
         else:
-            params = {
-                "padding":'max_length',  # Pad to max_length
-                "max_length": self.tokenizer.model_max_length,
-                "truncation":True,       # Truncate to max_length
-                "return_tensors":'pt'    # Return torch.Tensor objects
-            }
-            enc_u = self.tokenizer(code_a, **params)
-            enc_v = self.tokenizer(code_b, **params)
+            enc_u = self.tokenizer(code_a, **self.tokenizer_params)
+            enc_v = self.tokenizer(code_b, **self.tokenizer_params)
             # Remove batch dimension
             enc_u = {k: v.squeeze(0) for k, v in enc_u.items()}
             enc_v = {k: v.squeeze(0) for k, v in enc_v.items()}
@@ -150,11 +148,12 @@ class CodeNetPairDataset(Dataset):
         print("Filtered dataset:", df.shape)
         df = sample_df(df, samples_per_class=(num_rows // 2))
         print("Sampled dataset:", df.shape)
-
+        
+        pids = df["pid"].to_list()
         codes_a = df["src_1"].to_list()
         codes_b = df["src_2"].to_list()
         labels = df["label"].to_list()
-        return cls(codes_a, codes_b, labels, tokenizer, return_single_encoding)
+        return cls(pids, codes_a, codes_b, labels, tokenizer, return_single_encoding)
 
 
 class CodeNetTripletDataset(Dataset):
@@ -173,6 +172,7 @@ class CodeNetTripletDataset(Dataset):
 
     def __init__(
         self,
+        pids,
         codes_a,
         codes_p,
         codes_n,
@@ -182,24 +182,24 @@ class CodeNetTripletDataset(Dataset):
     ):
         super().__init__()
         assert len(codes_a) == len(codes_p) == len(codes_n), "Length MUST match!"
+        self.pids = pids
         self.codes_a = codes_a
         self.codes_p = codes_p
         self.codes_n = codes_n
         self.tokenizer = tokenizer
-
-    def __getitem__(self, idx):
-        code_a = self.codes_a[idx]
-        code_p = self.codes_p[idx]
-        code_n = self.codes_n[idx]
-        
-        params = {
+        self.tokenizer_params = {
             "padding": "max_length",  # Pad to max_length
             "max_length": self.tokenizer.model_max_length,
             "truncation": True,  # Truncate to max_length
             "return_tensors": "pt",  # Return torch.Tensor objects
         }
+
+    def __getitem__(self, idx):
+        code_a = self.codes_a[idx]
+        code_p = self.codes_p[idx]
+        code_n = self.codes_n[idx]
         # Encode the sequences for sequence pair similarity
-        encodings = self.tokenizer([code_a, code_p, code_n], **params)
+        encodings = self.tokenizer([code_a, code_p, code_n], **self.tokenizer_params)
         # Remove batch dimensions
         enc_a = {k: v[0] for k, v in encodings.items()}
         enc_p = {k: v[1] for k, v in encodings.items()}
@@ -230,10 +230,11 @@ class CodeNetTripletDataset(Dataset):
         df = df.sample(num_rows)
         print("Sampled dataset:", df.shape)
 
+        pids = df["pid"].to_list()
         codes_a = df["src_a"].to_list()
         codes_p = df["src_p"].to_list()
         codes_n = df["src_n"].to_list()
-        return cls(codes_a, codes_p, codes_n, tokenizer)
+        return cls(pids, codes_a, codes_p, codes_n, tokenizer)
 
 
 def Create_CodeNet_paired_dataset(
@@ -278,3 +279,49 @@ def Create_CodeNet_triplet_dataset(
         num_rows=num_rows, 
     )
     return dataset
+
+
+class POJ104TripletDataset(Dataset):
+    """Simple wrapper for sampling triplets from the dataset 'semeru/Code-Code-CloneDetection-POJ104'"""
+    
+    def __init__(self, poj_dataset, tokenizer: (transformers.PreTrainedTokenizer | transformers.PreTrainedTokenizerFast)):
+        self.dataset = poj_dataset
+        self.lbl_to_idx = defaultdict(list)
+        for idx, item in enumerate(poj_dataset):
+            self.lbl_to_idx[item["label"]].append(idx)
+        self.labels = list(self.lbl_to_idx.keys())
+        self.tokenizer = tokenizer
+        self.tokenizer_params = {
+            "padding": "max_length",  # Pad to max_length
+            "max_length": self.tokenizer.model_max_length,
+            "truncation": True,  # Truncate to max_length
+            "return_tensors": "pt",  # Return torch.Tensor objects
+        }
+
+    def __getitem__(self, idx):  # TODO: maybe seed this explicitly
+        anchor = self.dataset[idx]
+
+        # Positive sample
+        pos_label = anchor["label"]
+        pos_index = idx
+        pos_indices = self.lbl_to_idx[pos_label]
+        while pos_index == idx: pos_index = random.choice(pos_indices)
+        positive = self.dataset[pos_index]
+
+        # Negative sample
+        neg_label = random.choice([lbl for lbl in self.labels if lbl != pos_label])
+        neg_index = random.choice(self.lbl_to_idx[neg_label])
+        negative = self.dataset[neg_index]
+
+        code_a, code_p, code_n = anchor["code"], positive["code"], negative["code"]
+        # Encode the sequences for sequence pair similarity
+        encodings = self.tokenizer([code_a, code_p, code_n], **self.tokenizer_params)
+        # Remove batch dimensions
+        enc_a = {k: v[0] for k, v in encodings.items()}
+        enc_p = {k: v[1] for k, v in encodings.items()}
+        enc_n = {k: v[2] for k, v in encodings.items()}
+        # Return the tokenized encodings
+        return enc_a, enc_p, enc_n
+
+    def __len__(self):
+        return len(self.dataset)

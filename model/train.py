@@ -13,6 +13,7 @@ from torch.utils.data import (
     random_split,
 )
 
+import datasets
 from transformers import (
     AutoTokenizer,
     AutoModel,
@@ -30,7 +31,8 @@ from model.code_sim_models import (
 )
 import model.code_sim_models as code_sim_models
 import model.code_sim_datasets as code_sim_datasets
-from model.config import TRAIN_ARGS
+import model.configs as configs
+from model.configs import TRAIN_ARGS
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -140,55 +142,35 @@ def get_scheduler(loader, optimizer, epochs, iters_to_accumulate, warmup=0.1):
     return scheduler
 
 
-def finetune_model(
-    finetuning_strategy="binary_cls_simpl",
-    pretrained_bert_name="huggingface/CodeBERTa-small-v1",
-    epochs=4,
-    # Learning rate
-    lr=1e-5,
-    # Weight decay
-    wd=1e-5,
-    # Batch size
-    bs=1,
-    # The gradient accumulation adds gradients over an effective batch of size : bs * iters_to_accumulate.
-    # If set to "1", you get the usual batch size
-    iters_to_accumulate=2,
-    # Model specific parameters
-    freeze_bert=False,  # NOTE: if true the BERT model is not finetuned
-    dropout_rate=0.2,
-    shuffle_dataloader=True,
-    num_rows=50,
-):
-    if finetuning_strategy not in {"binary_cls_simpl", "binary_cls_sbert",}:
+def finetune_model(config: configs.BasicCodeSimClassifierConfig):
+    if config.finetuning_strategy not in {"binary_cls_simpl", "binary_cls_sbert",}:
         raise ValueError("Invalid finetuning strategy.")
-
-    if finetuning_strategy == "binary_cls_simpl":
+    if config.finetuning_strategy == "binary_cls_simpl":
         model_cls = code_sim_models.CodeSimLinearCLS
         loss_func = nn.BCEWithLogitsLoss()
         loss_hook = code_sim_models.compute_loss_logit
-
-    if finetuning_strategy == "binary_cls_sbert":
+    if config.finetuning_strategy == "binary_cls_sbert":
         model_cls = code_sim_models.CodeSimSBertLinearCLS
         loss_func = nn.BCEWithLogitsLoss()
         loss_hook = code_sim_models.compute_loss_logit_SBert
 
     # Dataset creation
-    return_single_encoding = finetuning_strategy == "binary_cls_simpl"  # Specifies encoding scheme in dataset
-    tokenizer = AutoTokenizer.from_pretrained(pretrained_bert_name)
-    dataset = code_sim_datasets.Create_CodeNet_paired_dataset(tokenizer=tokenizer, num_rows=num_rows, return_single_encoding=return_single_encoding)
-    train_loader, valid_loader = get_loaders(dataset, bs, shuffle_dataloader, train_ratio=.8)
+    return_single_encoding = config.finetuning_strategy == "binary_cls_simpl"  # Specifies encoding scheme in dataset
+    tokenizer = AutoTokenizer.from_pretrained(config.pretrained_bert_name)
+    dataset = code_sim_datasets.Create_CodeNet_paired_dataset(tokenizer=tokenizer, num_rows=config.num_rows, return_single_encoding=return_single_encoding)
+    train_loader, valid_loader = get_loaders(dataset, config.bs, config.shuffle_dataloader, train_ratio=.8)
 
-    bert_model = AutoModel.from_pretrained(pretrained_bert_name).to(DEVICE)
+    bert_model = AutoModel.from_pretrained(config.pretrained_bert_name).to(DEVICE)
 
     model = model_cls(
         bert_model,
-        freeze_bert=freeze_bert,
-        dropout_rate=dropout_rate,
+        freeze_bert=config.freeze_bert,
+        dropout_rate=config.dropout_rate,
     )
     model.to(DEVICE)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
-    scheduler = get_scheduler(train_loader, optimizer, epochs, iters_to_accumulate)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=config.lr, weight_decay=config.wd)
+    scheduler = get_scheduler(train_loader, optimizer, config.epochs, config.iters_to_accumulate)
     trainer = code_sim_models.CodeSimilarityTrainer(
         model,
         (train_loader, valid_loader),
@@ -198,53 +180,44 @@ def finetune_model(
         scheduler=scheduler,
         device=DEVICE,
     )
-    trainer.train(epochs=epochs, iters_to_accumulate=iters_to_accumulate)
+    trainer.train(epochs=config.epochs, iters_to_accumulate=config.iters_to_accumulate)
     
     y_true, y_pred = eval_model_classifier(eval_data=valid_loader, model=model)
     print_reports(y_true, y_pred)
 
 
-def finetune_model_triplet(
-    pretrained_bert_name="huggingface/CodeBERTa-small-v1",
-    epochs=4,
-    lr_enc=1e-5,  # Encoder learning rate
-    wd_enc=1e-5,  # Encoder weight decay
-    lr_cls=1e-3,  # Classifier learning rate  
-    wd_cls=1e-5,  # Classifier weight decay
-    bs=1,  # Batch size
-    iters_to_accumulate=2,
-    # Model specific parameters
-    freeze_bert=False,  # NOTE: if true the BERT model is not finetuned
-    dropout_rate=0.2,
-    shuffle_dataloader=True,
-    num_rows=50,
-    margin=1.0,  # Triplet loss function hyperparameter
-    use_info_nce_inspired_loss=False,
-):
+def finetune_model_triplet(config: configs.TripletCodeSimClassifierConfig, use_poj=False):
     distance_function = lambda x, y: 1 - F.cosine_similarity(x, y)
-    loss_func = nn.TripletMarginWithDistanceLoss(distance_function=distance_function, margin=margin)
+    loss_func = nn.TripletMarginWithDistanceLoss(distance_function=distance_function, margin=config.margin)
     
-    if not use_info_nce_inspired_loss:
+    if not config.use_info_nce_inspired_loss:
         loss_hook = code_sim_models.compute_loss_triplet
     else:
         loss_hook = code_sim_models.compute_loss_triplet_2
     
     # Dataset creation
-    tokenizer = AutoTokenizer.from_pretrained(pretrained_bert_name)
-    dataset = code_sim_datasets.Create_CodeNet_triplet_dataset(tokenizer=tokenizer, num_rows=num_rows)
-    train_loader, valid_loader = get_loaders(dataset, bs, shuffle_dataloader, train_ratio=.8)
+    tokenizer = AutoTokenizer.from_pretrained(config.pretrained_bert_name)
+    if use_poj:
+        poj_dataset = datasets.load_dataset("semeru/Code-Code-CloneDetection-POJ104")
+        train_dataset = code_sim_datasets.POJ104TripletDataset(poj_dataset["train"], tokenizer)
+        valid_dataset = code_sim_datasets.POJ104TripletDataset(poj_dataset["validation"], tokenizer)
+        train_loader = DataLoader(train_dataset, batch_size=config.bs, shuffle=config.shuffle_dataloader)
+        valid_loader = DataLoader(valid_dataset, batch_size=config.bs, shuffle=config.shuffle_dataloader)
+    else:
+        dataset = code_sim_datasets.Create_CodeNet_triplet_dataset(tokenizer=tokenizer, num_rows=config.num_rows)
+        train_loader, valid_loader = get_loaders(dataset, config.bs, config.shuffle_dataloader, train_ratio=.8)
 
-    bert_model = AutoModel.from_pretrained(pretrained_bert_name).to(DEVICE)
+    bert_model = AutoModel.from_pretrained(config.pretrained_bert_name).to(DEVICE)
 
     enc_model = CodeSimSBertTripletENC(
         bert_model,
-        freeze_bert=freeze_bert,
-        dropout_rate=dropout_rate,
+        freeze_bert=config.freeze_bert,
+        dropout_rate=config.dropout_rate,
     )
     enc_model.to(DEVICE)
 
-    optimizer = torch.optim.AdamW(enc_model.parameters(), lr=lr_enc, weight_decay=wd_enc)
-    scheduler = get_scheduler(train_loader, optimizer, epochs, iters_to_accumulate)
+    optimizer = torch.optim.AdamW(enc_model.parameters(), lr=config.lr_enc, weight_decay=config.wd_enc)
+    scheduler = get_scheduler(train_loader, optimizer, config.epochs, config.iters_to_accumulate)
     trainer = code_sim_models.CodeSimilarityTrainer(
         enc_model,
         (train_loader, valid_loader),
@@ -254,65 +227,47 @@ def finetune_model_triplet(
         scheduler=scheduler,
         device=DEVICE,
     )
-    trainer.train(epochs=epochs, iters_to_accumulate=iters_to_accumulate)
+    trainer.train(epochs=config.epochs, iters_to_accumulate=config.iters_to_accumulate)
     
     y_true, y_pred = eval_model_triplet_simpl(eval_data=valid_loader, model=trainer.model)
     print_reports(y_true, y_pred)
     
     return
-    # TODO: Train classifier model AND cache the damned embeddings before!!!
+    # TODO: Train classifier model AND cache the embeddings before!!!
     cls_model = None
     
     y_true, y_pred = eval_model_triplet_chead(eval_data=valid_loader, cls_model=cls_model, enc_model=enc_model)
     print_reports(y_true, y_pred)
 
 
-def finetune_model_combined(
-    pretrained_bert_name="huggingface/CodeBERTa-small-v1",
-    epochs=4,
-    # Learning rates and weight decays
-    lr_bert=1e-5,
-    wd_bert=1e-5,  # bert often needs smaller weight decay
-    lr_proj=1e-4,
-    wd_proj=1e-5,
-    bs=1,
-    iters_to_accumulate=2,
-    # Model specific parameters
-    freeze_bert=False,  # NOTE: if true the BERT model is not finetuned
-    dropout_rate=0.2,
-    shuffle_dataloader=True,
-    num_rows=50,
-    margin=1.0,
-    w_emb=1.0,
-    w_cls=1.0,
-):
+def finetune_model_combined(config: configs.CombinedCodeSimClassifierConfig):
     # Dataset creation
-    tokenizer = AutoTokenizer.from_pretrained(pretrained_bert_name)
+    tokenizer = AutoTokenizer.from_pretrained(config.pretrained_bert_name)
     
     dataset = code_sim_datasets.Create_CodeNet_triplet_dataset(tokenizer=tokenizer,
-        num_rows=num_rows,
+        num_rows=config.num_rows,
     )
-    train_loader, valid_loader = get_loaders(dataset, bs, shuffle_dataloader, train_ratio=.8)
+    train_loader, valid_loader = get_loaders(dataset, config.bs, config.shuffle_dataloader, train_ratio=.8)
 
-    bert_model = AutoModel.from_pretrained(pretrained_bert_name).to(DEVICE)
+    bert_model = AutoModel.from_pretrained(config.pretrained_bert_name).to(DEVICE)
 
     model = CodeSimCombinedModel(
         bert_model,
-        freeze_bert=freeze_bert,
-        dropout_rate=dropout_rate,
+        freeze_bert=config.freeze_bert,
+        dropout_rate=config.dropout_rate,
     )
     model.to(DEVICE)
     
-    loss_func = code_sim_models.Create_CombinedLoss(w_emb, w_cls, margin=margin)
+    loss_func = code_sim_models.Create_CombinedLoss(config.w_emb, config.w_cls, margin=config.margin)
 
     # NOTE: Allow different lr and wd for BERT and projection head params
     param_groups = [
-        {"params": model.bert.parameters(), "lr": lr_bert, "weight_decay": wd_bert},
-        {"params": model.emb_head.parameters(), "lr": lr_proj, "weight_decay": wd_proj},
-        {"params": model.cls_head.parameters(), "lr": lr_proj, "weight_decay": wd_proj},
+        {"params": model.bert.parameters(), "lr": config.lr_bert, "weight_decay": config.wd_bert},
+        {"params": model.emb_head.parameters(), "lr": config.lr_proj, "weight_decay": config.wd_proj},
+        {"params": model.cls_head.parameters(), "lr": config.lr_proj, "weight_decay": config.wd_proj},
     ]
     optimizer = torch.optim.AdamW(param_groups)
-    scheduler = get_scheduler(train_loader, optimizer, epochs, iters_to_accumulate)
+    scheduler = get_scheduler(train_loader, optimizer, config.epochs, config.iters_to_accumulate)
     trainer = code_sim_models.CodeSimilarityTrainer(
         model,
         (train_loader, valid_loader),
@@ -322,8 +277,37 @@ def finetune_model_combined(
         scheduler=scheduler,
         device=DEVICE,
     )
-    trainer.train(epochs=epochs, iters_to_accumulate=iters_to_accumulate)
+    trainer.train(epochs=config.epochs, iters_to_accumulate=config.iters_to_accumulate)
     # TODO: Evaluation logic here
+
+
+def count_overlapping_pids(
+    seed_value, factory,
+    pretrained_bert_name="huggingface/CodeBERTa-small-v1",
+    num_rows=50_000,
+):
+    set_seed(seed_value=seed_value)
+    # Dataset creation
+    tokenizer = AutoTokenizer.from_pretrained(pretrained_bert_name)
+    dataset = factory(tokenizer=tokenizer, num_rows=num_rows)
+    
+    train_len = int(0.8 * len(dataset))
+    valid_len = len(dataset) - train_len
+    train_data, valid_data = random_split(dataset, [train_len, valid_len])
+    print(len(train_data), len(valid_data))
+    
+    # Access problem IDs from the splits
+    train_pids = {dataset.pids[i] for i in train_data.indices}
+    valid_pids = {dataset.pids[i] for i in valid_data.indices}
+    valid_pids_l = [dataset.pids[i] for i in valid_data.indices]    
+    
+    # Count overlaps
+    overlap_pids = train_pids.intersection(valid_pids)
+    print(f"Count of problem IDs:\n{len(train_pids.union(valid_pids))}")
+    print(f"Count of overlapping problem IDs between splits:\n{len(overlap_pids)}")
+    num_overlapping_valid_rows = sum(1 for pid in valid_pids_l if pid in train_pids)
+    print(f"Count of overlapping rows in validation split:\n{num_overlapping_valid_rows}")
+    print(f"Ratio of overlapping rows in validation split:\n{num_overlapping_valid_rows/len(valid_data)}")
 
 
 def eval(model, num_rows=5000):
