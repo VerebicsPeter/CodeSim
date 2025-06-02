@@ -1,9 +1,11 @@
+from typing import Any
 from dataclasses import dataclass
 
 @dataclass
 class BasicCodeSimClassifierConfig:
     finetuning_strategy="linear_binary_cls"
     pretrained_bert_name="huggingface/CodeBERTa-small-v1"
+    tokenizer:Any|None=None
     epochs=4
     lr=1e-5
     wd=1e-5
@@ -17,6 +19,7 @@ class BasicCodeSimClassifierConfig:
 @dataclass
 class TripletCodeSimClassifierConfig:
     pretrained_bert_name="huggingface/CodeBERTa-small-v1"
+    tokenizer:Any|None=None
     epochs= 4
     # Learning rates and weight decays
     lr_enc=1e-5  # Encoder learning rate
@@ -38,6 +41,7 @@ class TripletCodeSimClassifierConfig:
 @dataclass
 class CombinedCodeSimClassifierConfig:
     pretrained_bert_name= "huggingface/CodeBERTa-smal-v1"
+    tokenizer:Any|None=None
     epochs=4
     # Learning rates and weight decays
     lr_bert=1e-5

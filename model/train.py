@@ -97,10 +97,11 @@ def finetune_model(config: configs.BasicCodeSimClassifierConfig):
         loss_func = nn.BCEWithLogitsLoss()
         loss_hook = code_sim_models.compute_loss_logit_SBert
 
+    if config.tokenizer is None: config.tokenizer = AutoTokenizer.from_pretrained(config.pretrained_bert_name)
+
     # Dataset creation
     return_single_encoding = config.finetuning_strategy == "binary_cls_simpl"  # Specifies encoding scheme in dataset
-    tokenizer = AutoTokenizer.from_pretrained(config.pretrained_bert_name)
-    dataset = code_sim_datasets.Create_CodeNet_paired_dataset(tokenizer=tokenizer, num_rows=config.num_rows, return_single_encoding=return_single_encoding)
+    dataset = code_sim_datasets.Create_CodeNet_paired_dataset(tokenizer=config.tokenizer, num_rows=config.num_rows, return_single_encoding=return_single_encoding)
     train_loader, valid_loader = get_loaders(dataset, config.bs, config.shuffle_dataloader, train_ratio=.8)
 
     bert_model = AutoModel.from_pretrained(config.pretrained_bert_name).to(DEVICE)
@@ -138,17 +139,18 @@ def finetune_model_triplet(config: configs.TripletCodeSimClassifierConfig, use_p
     else:
         loss_hook = code_sim_models.compute_loss_triplet_2
     
+    if config.tokenizer is None: config.tokenizer = AutoTokenizer.from_pretrained(config.pretrained_bert_name)
+    
     # Dataset creation
-    tokenizer = AutoTokenizer.from_pretrained(config.pretrained_bert_name)
     if use_poj:
-        poj_dataset = code_sim_datasets.Create_POJ104_triplet_dataset(tokenizer)
+        poj_dataset = code_sim_datasets.Create_POJ104_triplet_dataset(config.tokenizer)
         train_dataset, valid_dataset, test_dataset_map, test_dataset_cls = poj_dataset
         train_loader = DataLoader(train_dataset, batch_size=config.bs, shuffle=config.shuffle_dataloader)
         valid_loader = DataLoader(valid_dataset, batch_size=config.bs, shuffle=config.shuffle_dataloader)
         test_loader_map = DataLoader(test_dataset_map, batch_size=config.bs, shuffle=config.shuffle_dataloader)
         test_loader_cls = DataLoader(test_dataset_cls, batch_size=config.bs, shuffle=config.shuffle_dataloader)
     else:
-        dataset = code_sim_datasets.Create_CodeNet_triplet_dataset(tokenizer=tokenizer, num_rows=config.num_rows)
+        dataset = code_sim_datasets.Create_CodeNet_triplet_dataset(tokenizer=config.tokenizer, num_rows=config.num_rows)
         train_loader, valid_loader = get_loaders(dataset, config.bs, config.shuffle_dataloader, train_ratio=.8)
 
     bert_model = AutoModel.from_pretrained(config.pretrained_bert_name).to(DEVICE)
@@ -192,9 +194,10 @@ def finetune_model_triplet(config: configs.TripletCodeSimClassifierConfig, use_p
 
 def finetune_model_combined(config: configs.CombinedCodeSimClassifierConfig):
     # Dataset creation
-    tokenizer = AutoTokenizer.from_pretrained(config.pretrained_bert_name)
+    if config.tokenizer is None: config.tokenizer = AutoTokenizer.from_pretrained(config.pretrained_bert_name)
     
-    dataset = code_sim_datasets.Create_CodeNet_triplet_dataset(tokenizer=tokenizer,
+    dataset = code_sim_datasets.Create_CodeNet_triplet_dataset(
+        tokenizer=config.tokenizer,
         num_rows=config.num_rows,
     )
     train_loader, valid_loader = get_loaders(dataset, config.bs, config.shuffle_dataloader, train_ratio=.8)
