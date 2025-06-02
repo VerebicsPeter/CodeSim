@@ -3,7 +3,9 @@ import gdown
 import pandas as pd
 import pprint as pp
 import random
+import datasets
 import transformers
+import torch
 from torch.utils.data import Dataset
 from typing import Iterable
 from collections import defaultdict
@@ -281,6 +283,30 @@ def Create_CodeNet_triplet_dataset(
     return dataset
 
 
+class POJDataset(Dataset):
+    """Simple wrapper for the dataset 'semeru/Code-Code-CloneDetection-POJ104'"""
+    
+    def __init__(self, poj_dataset, tokenizer: (transformers.PreTrainedTokenizer | transformers.PreTrainedTokenizerFast)):
+        self.tokenizer = tokenizer
+        self.tokenizer_params = {
+            "padding": "max_length",  # Pad to max_length
+            "max_length": self.tokenizer.model_max_length,
+            "truncation": True,  # Truncate to max_length
+            "return_tensors": "pt",  # Return torch.Tensor objects
+        }
+        self.dataset = poj_dataset
+
+    def __getitem__(self, idx):
+        item = self.dataset[idx]
+        encs = self.tokenizer(item["code"], **self.tokenizer_params)
+        lbls = item["label"]
+        lbls = torch.tensor(list(map(int, lbls))).long()
+        return encs, lbls
+
+    def __len__(self):
+        return len(self.dataset)
+
+
 class POJ104TripletDataset(Dataset):
     """Simple wrapper for sampling triplets from the dataset 'semeru/Code-Code-CloneDetection-POJ104'"""
     
@@ -325,3 +351,12 @@ class POJ104TripletDataset(Dataset):
 
     def __len__(self):
         return len(self.dataset)
+
+
+def Create_POJ104_triplet_dataset(tokenizer):
+    poj_dataset = datasets.load_dataset("semeru/Code-Code-CloneDetection-POJ104")
+    train_dataset = POJ104TripletDataset(poj_dataset["train"], tokenizer)
+    valid_dataset = POJ104TripletDataset(poj_dataset["validation"], tokenizer)
+    test_dataset_map = POJDataset(poj_dataset["test"], tokenizer)
+    test_dataset_cls = POJ104TripletDataset(poj_dataset["train"], tokenizer)
+    return train_dataset, valid_dataset, test_dataset_map, test_dataset_cls

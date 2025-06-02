@@ -1,7 +1,5 @@
 import argparse
-import numpy as np
 import matplotlib.pyplot as plt
-import random
 
 from tqdm import tqdm
 
@@ -13,7 +11,6 @@ from torch.utils.data import (
     random_split,
 )
 
-import datasets
 from transformers import (
     AutoTokenizer,
     AutoModel,
@@ -31,66 +28,12 @@ from model.code_sim_models import (
 )
 import model.code_sim_models as code_sim_models
 import model.code_sim_datasets as code_sim_datasets
+import model.metrics as metrics
 import model.configs as configs
 from model.configs import TRAIN_ARGS
+from model.utils import set_seed
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-
-def set_seed(seed_value):
-    random.seed(seed_value)
-    np.random.seed(seed_value)
-    torch.manual_seed(seed_value)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed_value)
-
-
-def test_forward_passes(pretrained_bert_name: str = "huggingface/CodeBERTa-small-v1"):
-    code = """print("Hello, World!")"""
-    code_p = """hello_str = "Hello, World!"; print(hello_str)"""
-    code_n = """def add(x,y): return x+y"""
-
-    bert = AutoModel.from_pretrained(pretrained_bert_name).to(DEVICE)
-    bert_tokenizer = AutoTokenizer.from_pretrained(pretrained_bert_name)
-
-    params = {
-        "padding":'max_length',  # Pad to max_length
-        "max_length": bert_tokenizer.model_max_length,
-        "truncation":True,       # Truncate to max_length
-        "return_tensors":'pt'    # Return torch.Tensor objects
-    }
-    inputs = bert_tokenizer(code, **params)
-    inputs_p = bert_tokenizer(code_p, **params)
-    inputs_n = bert_tokenizer(code_n, **params)
-    
-    #pooling_strat=code_sim_models.AttentionPooler(768,768)
-    model1 = CodeSimLinearCLS(bert).to(DEVICE)
-    model2 = CodeSimSBertLinearCLS(bert).to(DEVICE)
-    model3_1 = CodeSimSBertTripletENC(bert).to(DEVICE)
-    model3_2 = CodeSimSBertTripletCLS(bert.config.hidden_size).to(DEVICE)
-    model4 = CodeSimCombinedModel(bert).to(DEVICE)
-
-    emb1 = model1(inputs)
-    print(f"{model1.__class__.__name__} output shape:", emb1.shape)
-
-    emb2 = model2(inputs, inputs)
-    print(f"{model2.__class__.__name__} output shape:", emb2.shape)
-
-    emb3 = model3_1(inputs)
-    print(f"{model3_1.__class__.__name__} ENC output shape:", emb3.shape)
-    out3 = model3_2(emb3, emb3)
-    print(f"{model3_2.__class__.__name__} CLS output shape:", out3.shape)
-
-    emb4 = model4(inputs)
-    print(f"{model4.__class__.__name__} output shape:", emb4.shape)
-    
-    apn_inputs = { 
-        key: torch.cat([inputs[key], inputs_p[key], inputs_n[key]]) for key in inputs.keys()
-    }
-    t_es, t_ls = model4.forward_train(apn_inputs)
-    print(f"{model4.__class__.__name__} output shape for train pass:", t_es.shape, t_ls.shape)
 
 
 def print_reports(y_true, y_pred, thresholds=(.5,.7,.9)):
@@ -198,11 +141,11 @@ def finetune_model_triplet(config: configs.TripletCodeSimClassifierConfig, use_p
     # Dataset creation
     tokenizer = AutoTokenizer.from_pretrained(config.pretrained_bert_name)
     if use_poj:
-        poj_dataset = datasets.load_dataset("semeru/Code-Code-CloneDetection-POJ104")
-        train_dataset = code_sim_datasets.POJ104TripletDataset(poj_dataset["train"], tokenizer)
-        valid_dataset = code_sim_datasets.POJ104TripletDataset(poj_dataset["validation"], tokenizer)
+        poj_dataset = code_sim_datasets.Create_POJ104_triplet_dataset(tokenizer)
+        train_dataset, valid_dataset, test_dataset = poj_dataset
         train_loader = DataLoader(train_dataset, batch_size=config.bs, shuffle=config.shuffle_dataloader)
         valid_loader = DataLoader(valid_dataset, batch_size=config.bs, shuffle=config.shuffle_dataloader)
+        test_loader = DataLoader(test_dataset, batch_size=config.bs, shuffle=config.shuffle_dataloader)
     else:
         dataset = code_sim_datasets.Create_CodeNet_triplet_dataset(tokenizer=tokenizer, num_rows=config.num_rows)
         train_loader, valid_loader = get_loaders(dataset, config.bs, config.shuffle_dataloader, train_ratio=.8)
@@ -229,15 +172,21 @@ def finetune_model_triplet(config: configs.TripletCodeSimClassifierConfig, use_p
     )
     trainer.train(epochs=config.epochs, iters_to_accumulate=config.iters_to_accumulate)
     
-    y_true, y_pred = eval_model_triplet_simpl(eval_data=valid_loader, model=trainer.model)
-    print_reports(y_true, y_pred)
-    
-    return
-    # TODO: Train classifier model AND cache the embeddings before!!!
-    cls_model = None
-    
-    y_true, y_pred = eval_model_triplet_chead(eval_data=valid_loader, cls_model=cls_model, enc_model=enc_model)
-    print_reports(y_true, y_pred)
+    if use_poj:
+        print("Evaluating on POJ-104 retriaval...")
+        mapr = eval_model_triplet_mapr(eval_data=test_loader, model=trainer.model)
+        print(f"MAP@R=499: {mapr}")
+        print("Evaluating on POJ-104 classification...")
+        y_true, y_pred = eval_model_triplet_simpl(eval_data=test_loader, model=trainer.model)
+        print_reports(y_true, y_pred)
+    else:
+        y_true, y_pred = eval_model_triplet_simpl(eval_data=valid_loader, model=trainer.model)
+        print_reports(y_true, y_pred)
+        return
+        # TODO: Train classifier model AND cache the embeddings before!!!
+        cls_model = None    
+        y_true, y_pred = eval_model_triplet_chead(eval_data=valid_loader, cls_model=cls_model, enc_model=enc_model)
+        print_reports(y_true, y_pred)
 
 
 def finetune_model_combined(config: configs.CombinedCodeSimClassifierConfig):
@@ -281,39 +230,10 @@ def finetune_model_combined(config: configs.CombinedCodeSimClassifierConfig):
     # TODO: Evaluation logic here
 
 
-def count_overlapping_pids(
-    seed_value, factory,
-    pretrained_bert_name="huggingface/CodeBERTa-small-v1",
-    num_rows=50_000,
-):
-    set_seed(seed_value=seed_value)
-    # Dataset creation
-    tokenizer = AutoTokenizer.from_pretrained(pretrained_bert_name)
-    dataset = factory(tokenizer=tokenizer, num_rows=num_rows)
-    
-    train_len = int(0.8 * len(dataset))
-    valid_len = len(dataset) - train_len
-    train_data, valid_data = random_split(dataset, [train_len, valid_len])
-    print(len(train_data), len(valid_data))
-    
-    # Access problem IDs from the splits
-    train_pids = {dataset.pids[i] for i in train_data.indices}
-    valid_pids = {dataset.pids[i] for i in valid_data.indices}
-    valid_pids_l = [dataset.pids[i] for i in valid_data.indices]    
-    
-    # Count overlaps
-    overlap_pids = train_pids.intersection(valid_pids)
-    print(f"Count of problem IDs:\n{len(train_pids.union(valid_pids))}")
-    print(f"Count of overlapping problem IDs between splits:\n{len(overlap_pids)}")
-    num_overlapping_valid_rows = sum(1 for pid in valid_pids_l if pid in train_pids)
-    print(f"Count of overlapping rows in validation split:\n{num_overlapping_valid_rows}")
-    print(f"Ratio of overlapping rows in validation split:\n{num_overlapping_valid_rows/len(valid_data)}")
-
-
 def eval(model, num_rows=5000):
-    model.to(DEVICE)
-    
     set_seed(42)
+    
+    model.to(DEVICE)
     tokenizer = code_sim_models.get_tokenizer(model.bert)
 
     if isinstance(model, CodeSimLinearCLS):
@@ -430,13 +350,36 @@ def eval_model_triplet_chead(eval_data: DataLoader,
     return y_true, y_pred
 
 
+@torch.no_grad
+def eval_model_triplet_mapr(eval_data: DataLoader,
+                            enc_model: CodeSimSBertTripletENC):
+    all_embs = []
+    all_lbls = []
+    for data in tqdm(eval_data):
+        encs, lbls = data
+        code_sim_models.put_batch_encoding_to_device(encs, enc_model.bert.device)
+        embs = enc_model.forward(encs)
+        lbls = lbls.to(enc_model.bert.device)
+        all_embs.append(embs)
+        all_lbls.append(lbls)
+    all_embs = torch.cat(all_embs, dim=0)
+    all_lbls = torch.cat(all_lbls, dim=0)
+    map_at_R = metrics.calculate_map_at_R(all_embs, all_lbls, R=499)
+    return map_at_R
+
+
 if __name__ == "__main__":
     set_seed(42)  # TODO: Maybe load this from a .env or something
     
     TRAIN_FUNC = {
-        "basic": finetune_model,
-        "triplet": finetune_model_triplet,
+        "basic":    finetune_model,
+        "triplet":  finetune_model_triplet,
         "combined": finetune_model_combined,
+    }
+    TRAIN_CONF = {
+        "basic":    configs.BasicCodeSimClassifierConfig,
+        "triplet":  configs.TripletCodeSimClassifierConfig,
+        "combined": configs.CombinedCodeSimClassifierConfig,
     }
     
     # Parse the model type first
@@ -455,4 +398,4 @@ if __name__ == "__main__":
     args = parser.parse_args(unknown_args)
     
     # Train the model
-    train_func(**vars(args))
+    train_func(TRAIN_CONF[known_args.model_type](**vars(args)))
