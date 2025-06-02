@@ -142,10 +142,11 @@ def finetune_model_triplet(config: configs.TripletCodeSimClassifierConfig, use_p
     tokenizer = AutoTokenizer.from_pretrained(config.pretrained_bert_name)
     if use_poj:
         poj_dataset = code_sim_datasets.Create_POJ104_triplet_dataset(tokenizer)
-        train_dataset, valid_dataset, test_dataset = poj_dataset
+        train_dataset, valid_dataset, test_dataset_map, test_dataset_cls = poj_dataset
         train_loader = DataLoader(train_dataset, batch_size=config.bs, shuffle=config.shuffle_dataloader)
         valid_loader = DataLoader(valid_dataset, batch_size=config.bs, shuffle=config.shuffle_dataloader)
-        test_loader = DataLoader(test_dataset, batch_size=config.bs, shuffle=config.shuffle_dataloader)
+        test_loader_map = DataLoader(test_dataset_map, batch_size=config.bs, shuffle=config.shuffle_dataloader)
+        test_loader_cls = DataLoader(test_dataset_cls, batch_size=config.bs, shuffle=config.shuffle_dataloader)
     else:
         dataset = code_sim_datasets.Create_CodeNet_triplet_dataset(tokenizer=tokenizer, num_rows=config.num_rows)
         train_loader, valid_loader = get_loaders(dataset, config.bs, config.shuffle_dataloader, train_ratio=.8)
@@ -174,10 +175,10 @@ def finetune_model_triplet(config: configs.TripletCodeSimClassifierConfig, use_p
     
     if use_poj:
         print("Evaluating on POJ-104 retriaval...")
-        mapr = eval_model_triplet_mapr(eval_data=test_loader, model=trainer.model)
-        print(f"MAP@R=499: {mapr}")
+        mapr           = eval_model_triplet_mapr(eval_data=test_loader_map, model=trainer.model)
+        print(f"MAP @ R=499 : {mapr}")
         print("Evaluating on POJ-104 classification...")
-        y_true, y_pred = eval_model_triplet_simpl(eval_data=test_loader, model=trainer.model)
+        y_true, y_pred = eval_model_triplet_simpl(eval_data=test_loader_cls, model=trainer.model)
         print_reports(y_true, y_pred)
     else:
         y_true, y_pred = eval_model_triplet_simpl(eval_data=valid_loader, model=trainer.model)

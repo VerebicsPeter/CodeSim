@@ -33,7 +33,7 @@ class TripletCodeSimClassifierConfig:
     num_rows=5000
     # Loss function hyperparameters
     margin=1.0
-    use_info_nce_inspired_loss= False
+    use_info_nce_inspired_loss=False
 
 @dataclass
 class CombinedCodeSimClassifierConfig:
