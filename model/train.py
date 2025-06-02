@@ -353,14 +353,14 @@ def eval_model_triplet_chead(eval_data: DataLoader,
 
 @torch.no_grad
 def eval_model_triplet_mapr(eval_data: DataLoader,
-                            enc_model: CodeSimSBertTripletENC):
+                            model: CodeSimSBertTripletENC):
     all_embs = []
     all_lbls = []
     for data in tqdm(eval_data):
         encs, lbls = data
-        code_sim_models.put_batch_encoding_to_device(encs, enc_model.bert.device)
-        embs = enc_model.forward(encs)
-        lbls = lbls.to(enc_model.bert.device)
+        code_sim_models.put_batch_encoding_to_device(encs, model.bert.device)
+        embs = model.forward(encs)
+        lbls = lbls.to(model.bert.device)
         all_embs.append(embs)
         all_lbls.append(lbls)
     all_embs = torch.cat(all_embs, dim=0)

@@ -298,10 +298,10 @@ class POJDataset(Dataset):
 
     def __getitem__(self, idx):
         item = self.dataset[idx]
-        encs = self.tokenizer(item["code"], **self.tokenizer_params)
-        lbls = item["label"]
-        lbls = torch.tensor(list(map(int, lbls))).long()
-        return encs, lbls
+        enc = self.tokenizer(item["code"], **self.tokenizer_params)
+        enc = {k: v.squeeze(0) for k, v in enc.items()}  # remove batch dim
+        lbl = torch.tensor(int(item["label"])).long()
+        return enc, lbl
 
     def __len__(self):
         return len(self.dataset)
@@ -358,5 +358,5 @@ def Create_POJ104_triplet_dataset(tokenizer):
     train_dataset = POJ104TripletDataset(poj_dataset["train"], tokenizer)
     valid_dataset = POJ104TripletDataset(poj_dataset["validation"], tokenizer)
     test_dataset_map = POJDataset(poj_dataset["test"], tokenizer)
-    test_dataset_cls = POJ104TripletDataset(poj_dataset["train"], tokenizer)
+    test_dataset_cls = POJ104TripletDataset(poj_dataset["test"], tokenizer)
     return train_dataset, valid_dataset, test_dataset_map, test_dataset_cls
