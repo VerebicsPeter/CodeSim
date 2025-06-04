@@ -58,7 +58,7 @@ def get_batch_encodings(
     inputs = {k: v.to(device) for k, v in inputs.items()}
     return inputs
 
-
+# TODO: augment pairs by flipping the order of the pair
 class CodeNetPairDataset(Dataset):
     """Dataset for BERT encodings from CodeNet code pairs."""
 
@@ -145,8 +145,7 @@ class CodeNetPairDataset(Dataset):
             
             pids.extend([pid] * len(anchors)*2)
             
-            pairs.extend([*zip(anchors, positives), 
-                          *zip(anchors, negatives)])
+            pairs.extend([*zip(anchors, positives), *zip(anchors, negatives)])
             
             labels.extend([1] * len(anchors) + [0] * len(anchors))
         
@@ -228,6 +227,78 @@ class CodeNetTripletDataset(Dataset):
         return cls(pids, triplets, tokenizer, tokenizer_max_length)
 
 
+class CodeNetRandomTripletDataset(Dataset):
+    """Dataset for BERT encodings from CodeNet code triplets."""
+
+    def __init__(
+        self,
+        pids,
+        positives,
+        negatives,
+        pid_to_pos,
+        pid_to_neg,
+        tokenizer: (
+            transformers.PreTrainedTokenizer | transformers.PreTrainedTokenizerFast
+        ),
+        tokenizer_max_length: int = 256,
+    ):
+        super().__init__()
+        
+        assert len(pids) == len(positives), "Length MUST match!"
+        self.pids = pids
+        self.positives = positives
+        self.negatives = negatives
+        self.pid_to_pos = pid_to_pos
+        self.pid_to_neg = pid_to_neg
+        
+        self.tokenizer = tokenizer
+        self.tokenizer_params = {
+            "padding": "max_length",  # Pad to max_length
+            "max_length": tokenizer_max_length,
+            "truncation": True,  # Truncate to max_length
+            "return_tensors": "pt",  # Return torch.Tensor objects
+        }
+
+    def __getitem__(self, idx):
+        pid = self.pids[idx]
+        anchor = self.positives[idx]
+        positive = random.choice(self.pid_to_pos[pid])
+        negative = random.choice(self.pid_to_neg[pid])
+        encodings = self.tokenizer([anchor, positive, negative], **self.tokenizer_params)
+        # Remove batch dimensions
+        enc_a = {k: v[0] for k, v in encodings.items()}
+        enc_p = {k: v[1] for k, v in encodings.items()}
+        enc_n = {k: v[2] for k, v in encodings.items()}
+        return enc_a, enc_p, enc_n
+
+    def __len__(self):
+        return len(self.positives)
+
+    @classmethod
+    def from_pandas_df(
+        cls,
+        df: pd.DataFrame,
+        tokenizer,
+        tokenizer_max_length: int = 256,
+    ):
+        pids, pos, neg = [], [], []
+        pid_to_pos = {}
+        pid_to_neg = {}
+        
+        for pid, group_df in df.groupby("problem_id"):
+            assert (group_df[:200]["status"] == "Accepted").all()
+            assert (group_df[200:]["status"] != "Accepted").all()
+            positives = group_df[:200]["code"].to_list()
+            negatives = group_df[200:]["code"].to_list()
+            pos.extend(positives)
+            neg.extend(negatives)
+            pids.extend([pid] * len(positives))
+            pid_to_pos[pid] = positives
+            pid_to_neg[pid] = negatives
+
+        return cls(pids, pos, neg, pid_to_pos, pid_to_neg, tokenizer, tokenizer_max_length)
+
+
 def Create_CodeNet_paired_dataset(
     tokenizer,
     tokenizer_max_length=256,
@@ -260,11 +331,11 @@ def Create_CodeNet_triplet_dataset(
     print("CodeNet data loaded. Data type: triplet")
     pp.pp(df)
 
-    dataset = CodeNetTripletDataset.from_pandas_df(
+    dataset = CodeNetRandomTripletDataset.from_pandas_df(
         df,
         tokenizer=tokenizer,
         tokenizer_max_length=tokenizer_max_length,
-)
+    )
     return dataset
 
 
