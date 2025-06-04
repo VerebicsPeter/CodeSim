@@ -37,7 +37,7 @@ class BaseConfig:
 
 @dataclass
 class BasicCodeSimClassifierConfig(BaseConfig):
-    finetuning_strategy: str = "linear_binary_cls"
+    finetuning_strategy: str = "binary_cls_simpl"
     # Learning rates and weight decays
     lr: float = 1e-5
     wd: float = 1e-5

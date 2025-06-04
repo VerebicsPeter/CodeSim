@@ -22,7 +22,7 @@ DATASET_TYPE = {
 COLUMNS = ["problem_id", "submission_id", "status", "code"]
 NEW_DATASET_URL_SMALL = "https://drive.google.com/uc?export=download&id=1hZ4_QjTcmesQYsPo75G1lyIe__HFfwbG"
 NEW_DATASET_URL_LARGE = "https://drive.google.com/uc?export=download&id=10ok2e2BmWRVhn_V6tRBZzLfeYQ0eaJA2"
-DATASET_URL = NEW_DATASET_URL_SMALL
+DATASET_URL = NEW_DATASET_URL_LARGE
 
 # NOTE: Therse are old datasets
 DATASET_URLS = {
