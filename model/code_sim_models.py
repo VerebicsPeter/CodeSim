@@ -254,6 +254,7 @@ class CodeSimCombinedModel(nn.Module):
         return emb_head_output, cls_head_output
 
 
+# TODO: Also save the latest model.
 class CodeSimilarityTrainer(Trainer):
     def __init__(
         self,
@@ -420,20 +421,20 @@ def compute_loss_triplet_2(trainer: CodeSimilarityTrainer, batched_data, temp=0.
     """
     Loss strategy for finetuning BERT.
 
-    Given N different problems in CodeNet sample a,p,n triplets from each problem.  
-    (a,p passing and n failing)
-
-    Embed these s.t. if the embedding dim is D then:
-
-    A contains the (normalized) embeddings of ANCHOR samples ($A \in \mathbb{R}^{NxD}$)
-
-    Q contains the (normalized) embeddings of POSITIVE and then NEGATIVE samples (Q \in \mathbb{R}^{2*NxD})
-
-    e.g. if N=3 Q_1, Q_2, Q_3 are the positive embeddings and the rest are the negative embeddings...
-
-    then do `loss = -log(softmax(A*Q^T, dim=1).sum(dim=1))` with labels being `range(N)`
+    Given N DIFFERENT problems in CodeNet with
+    
+    `a,p,n` solutions for each problem (`a,p` passing and `n` failing)
+    
+    computes the loss on the embeddings of solutions as follows:
+    1. Concatenate the embeddings of `p`, `n` solutions (`Q`).
+    2. Compute the cosine similarities between the anchors and `Q`.
+    3. Scale the cosine similarities by `temp` to obtain logits.
+    4. Compute the cross-entropy loss between the logits and labels.
     """
-    # TODO: make temp a learnable parameter
+    # NOTE: (IMPORTANT)
+    # This REQUIRES the batched triplets to be from DIFFERENT problems!
+    # If the some triplets are from the same problem then labels are incorrect.
+    # TODO: Make temp a learnable parameter
     encs_a, encs_p, encs_n = batched_data
     batch_size = encs_a["input_ids"].shape[0]
     inputs = {key: torch.cat([encs_a[key], encs_p[key], encs_n[key]]) for key in encs_a}
@@ -442,9 +443,9 @@ def compute_loss_triplet_2(trainer: CodeSimilarityTrainer, batched_data, temp=0.
     embs = trainer.model(inputs)
     embs = F.normalize(embs, dim=1)  # normalize to align with cosine similarity
     A, POS, NEG = embs.split(batch_size)
-    Q = torch.cat([POS, NEG], dim=0)  # (2N, D)
-    logits = A @ Q.T / temp           # (N, 2N)
-    labels = torch.arange(batch_size, device=trainer.device)  # NOTE: ONLY correct if positives are first
+    Q = torch.cat([POS, NEG], dim=0)
+    logits = A @ Q.T / temp
+    labels = torch.arange(batch_size, device=trainer.device)
     
     return F.cross_entropy(logits, labels)
 

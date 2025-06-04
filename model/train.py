@@ -6,16 +6,9 @@ from tqdm import tqdm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import (
-    DataLoader,
-    random_split,
-)
+from torch.utils.data import DataLoader, random_split
 
-from transformers import (
-    AutoTokenizer,
-    AutoModel,
-    get_linear_schedule_with_warmup,
-)
+from transformers import get_linear_schedule_with_warmup
 
 from sklearn.metrics import classification_report, roc_curve, auc
 
@@ -32,6 +25,8 @@ import model.metrics as metrics
 import model.configs as configs
 from model.configs import TRAIN_ARGS
 from model.utils import set_seed
+
+from torch.utils.data import Subset
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -57,13 +52,20 @@ def print_reports(y_true, y_pred, thresholds=(.5,.7,.9)):
     plt.show()
 
 
-def get_loaders(dataset, bs, shuffle, train_ratio):
+def get_loaders(dataset, bs, shuffle, train_ratio, num_rows=None):
     if train_ratio < 0 or train_ratio > 1:
         raise ValueError("Train ratio must be between 0 and 1!")
     
+    if isinstance(num_rows, int) and num_rows > 0:
+        if num_rows > len(dataset):
+            raise ValueError("num_rows must be less than or equal to the dataset size!")
+        dataset = Subset(dataset, range(num_rows))
+    
     train_len = int(train_ratio * len(dataset))
     valid_len = len(dataset) - train_len
+    
     train_data, valid_data = random_split(dataset, [train_len, valid_len])
+    
     train_loader = DataLoader(train_data, batch_size=bs, shuffle=shuffle)
     valid_loader = DataLoader(valid_data, batch_size=bs, shuffle=shuffle)
     return train_loader, valid_loader
@@ -86,33 +88,49 @@ def get_scheduler(loader, optimizer, epochs, iters_to_accumulate, warmup=0.1):
 
 
 def finetune_model(config: configs.BasicCodeSimClassifierConfig):
-    if config.finetuning_strategy not in {"binary_cls_simpl", "binary_cls_sbert",}:
-        raise ValueError("Invalid finetuning strategy.")
+    config.post_init()  # init models if needed
+    
+    if config.finetuning_strategy not in configs.FINETUNING_STRATEGIES:
+        raise ValueError(f"Invalid finetuning strategy: {config.finetuning_strategy}.")
+    
     if config.finetuning_strategy == "binary_cls_simpl":
         model_cls = code_sim_models.CodeSimLinearCLS
         loss_func = nn.BCEWithLogitsLoss()
         loss_hook = code_sim_models.compute_loss_logit
+    
     if config.finetuning_strategy == "binary_cls_sbert":
         model_cls = code_sim_models.CodeSimSBertLinearCLS
         loss_func = nn.BCEWithLogitsLoss()
         loss_hook = code_sim_models.compute_loss_logit_SBert
 
-    if config.tokenizer is None: config.tokenizer = AutoTokenizer.from_pretrained(config.pretrained_bert_name)
+    # Dataset Creation
+    # NOTE: Finetuning strategy specifies encoding scheme in dataset.
+    return_single_encoding = config.finetuning_strategy == "binary_cls_simpl"
+    tokenizer_max_length = 512 if return_single_encoding else 256
+    
+    dataset = code_sim_datasets.Create_CodeNet_paired_dataset(
+        tokenizer=config.tokenizer,
+        tokenizer_max_length=tokenizer_max_length,
+        return_single_encoding=return_single_encoding,
+    )
+    
+    train_loader, valid_loader = get_loaders(
+        dataset,
+        config.bs,
+        config.shuffle_dataloader,
+        train_ratio=.8,
+        num_rows=config.num_rows
+    )
 
-    # Dataset creation
-    return_single_encoding = config.finetuning_strategy == "binary_cls_simpl"  # Specifies encoding scheme in dataset
-    dataset = code_sim_datasets.Create_CodeNet_paired_dataset(tokenizer=config.tokenizer, num_rows=config.num_rows, return_single_encoding=return_single_encoding)
-    train_loader, valid_loader = get_loaders(dataset, config.bs, config.shuffle_dataloader, train_ratio=.8)
-
-    bert_model = AutoModel.from_pretrained(config.pretrained_bert_name).to(DEVICE)
-
+    # Model Creation
     model = model_cls(
-        bert_model,
+        config.pretrained_bert,
         freeze_bert=config.freeze_bert,
         dropout_rate=config.dropout_rate,
     )
     model.to(DEVICE)
-
+    
+    # Trainer
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.lr, weight_decay=config.wd)
     scheduler = get_scheduler(train_loader, optimizer, config.epochs, config.iters_to_accumulate)
     trainer = code_sim_models.CodeSimilarityTrainer(
@@ -131,6 +149,8 @@ def finetune_model(config: configs.BasicCodeSimClassifierConfig):
 
 
 def finetune_model_triplet(config: configs.TripletCodeSimClassifierConfig, use_poj=False):
+    config.post_init()  # init models if needed
+    
     distance_function = lambda x, y: 1 - F.cosine_similarity(x, y)
     loss_func = nn.TripletMarginWithDistanceLoss(distance_function=distance_function, margin=config.margin)
     
@@ -139,9 +159,7 @@ def finetune_model_triplet(config: configs.TripletCodeSimClassifierConfig, use_p
     else:
         loss_hook = code_sim_models.compute_loss_triplet_2
     
-    if config.tokenizer is None: config.tokenizer = AutoTokenizer.from_pretrained(config.pretrained_bert_name)
-    
-    # Dataset creation
+    # Dataset Creation
     if use_poj:
         poj_dataset = code_sim_datasets.Create_POJ104_triplet_dataset(config.tokenizer)
         train_dataset, valid_dataset, test_dataset_map, test_dataset_cls = poj_dataset
@@ -150,18 +168,27 @@ def finetune_model_triplet(config: configs.TripletCodeSimClassifierConfig, use_p
         test_loader_map = DataLoader(test_dataset_map, batch_size=config.bs, shuffle=config.shuffle_dataloader)
         test_loader_cls = DataLoader(test_dataset_cls, batch_size=config.bs, shuffle=config.shuffle_dataloader)
     else:
-        dataset = code_sim_datasets.Create_CodeNet_triplet_dataset(tokenizer=config.tokenizer, num_rows=config.num_rows)
-        train_loader, valid_loader = get_loaders(dataset, config.bs, config.shuffle_dataloader, train_ratio=.8)
+        dataset = code_sim_datasets.Create_CodeNet_triplet_dataset(
+            tokenizer=config.tokenizer,
+            tokenizer_max_length=256,
+        )
+        train_loader, valid_loader = get_loaders(
+            dataset,
+            config.bs,
+            config.shuffle_dataloader,
+            train_ratio=.8,
+            num_rows=config.num_rows
+        )
 
-    bert_model = AutoModel.from_pretrained(config.pretrained_bert_name).to(DEVICE)
-
+    # Model Creation
     enc_model = CodeSimSBertTripletENC(
-        bert_model,
+        config.pretrained_bert,
         freeze_bert=config.freeze_bert,
         dropout_rate=config.dropout_rate,
     )
     enc_model.to(DEVICE)
 
+    # Trainer
     optimizer = torch.optim.AdamW(enc_model.parameters(), lr=config.lr_enc, weight_decay=config.wd_enc)
     scheduler = get_scheduler(train_loader, optimizer, config.epochs, config.iters_to_accumulate)
     trainer = code_sim_models.CodeSimilarityTrainer(
@@ -193,26 +220,30 @@ def finetune_model_triplet(config: configs.TripletCodeSimClassifierConfig, use_p
 
 
 def finetune_model_combined(config: configs.CombinedCodeSimClassifierConfig):
-    # Dataset creation
-    if config.tokenizer is None: config.tokenizer = AutoTokenizer.from_pretrained(config.pretrained_bert_name)
+    config.post_init()  # init models if needed
     
+    # Dataset creation
     dataset = code_sim_datasets.Create_CodeNet_triplet_dataset(
         tokenizer=config.tokenizer,
+        tokenizer_max_length=256,
+    )
+    train_loader, valid_loader = get_loaders(
+        dataset,
+        config.bs,
+        config.shuffle_dataloader,
+        train_ratio=.8,
         num_rows=config.num_rows,
     )
-    train_loader, valid_loader = get_loaders(dataset, config.bs, config.shuffle_dataloader, train_ratio=.8)
 
-    bert_model = AutoModel.from_pretrained(config.pretrained_bert_name).to(DEVICE)
-
+    # Model Creation
     model = CodeSimCombinedModel(
-        bert_model,
+        config.pretrained_bert,
         freeze_bert=config.freeze_bert,
         dropout_rate=config.dropout_rate,
     )
     model.to(DEVICE)
     
-    loss_func = code_sim_models.Create_CombinedLoss(config.w_emb, config.w_cls, margin=config.margin)
-
+    # Trainer
     # NOTE: Allow different lr and wd for BERT and projection head params
     param_groups = [
         {"params": model.bert.parameters(), "lr": config.lr_bert, "weight_decay": config.wd_bert},
@@ -224,7 +255,7 @@ def finetune_model_combined(config: configs.CombinedCodeSimClassifierConfig):
     trainer = code_sim_models.CodeSimilarityTrainer(
         model,
         (train_loader, valid_loader),
-        loss_func=loss_func,
+        loss_func=code_sim_models.Create_CombinedLoss(config.w_emb, config.w_cls, margin=config.margin),
         loss_hook=code_sim_models.compute_loss_combined,  # loss strategy
         optimizer=optimizer,
         scheduler=scheduler,
@@ -236,43 +267,45 @@ def finetune_model_combined(config: configs.CombinedCodeSimClassifierConfig):
 
 def eval(model, num_rows=5000):
     set_seed(42)
-    
     model.to(DEVICE)
+    
     tokenizer = code_sim_models.get_tokenizer(model.bert)
 
     if isinstance(model, CodeSimLinearCLS):
         dataset = code_sim_datasets.Create_CodeNet_paired_dataset(
             tokenizer=tokenizer,
-            num_rows=num_rows,
+            tokenizer_max_length=512,
             return_single_encoding=True,
         )
         evaluator = eval_model_classifier
     elif isinstance(model, CodeSimSBertLinearCLS):
         dataset = code_sim_datasets.Create_CodeNet_paired_dataset(
             tokenizer=tokenizer,
-            num_rows=num_rows,
             return_single_encoding=False,
         )
         evaluator = eval_model_classifier
     elif isinstance(model, CodeSimSBertTripletCLS):
         dataset = code_sim_datasets.Create_CodeNet_triplet_dataset(
             tokenizer=tokenizer,
-            num_rows=num_rows,
         )
         evaluator = eval_model_triplet_chead
     elif isinstance(model, CodeSimSBertTripletENC):
         dataset = code_sim_datasets.Create_CodeNet_triplet_dataset(
             tokenizer=tokenizer,
-            num_rows=num_rows,
         )
         evaluator = eval_model_triplet_simpl
     else:
         raise ValueError(f"Invalid model type. {model.__class__.__name__}")
 
     # NOTE/TODO:
-    # This replicates the split in the training function to create validation set of unseen data, 
+    # This replicates the split in the training function to create validation set of unseen data,
     # this could be avoided by pre-splitting the datasets...
-    _, valid_loader = get_loaders(dataset, bs=20, shuffle=False, train_ratio=0.8)
+    _, valid_loader = get_loaders(
+        dataset, bs=20,
+        shuffle=False,
+        train_ratio=0.8,
+        num_rows=num_rows,
+    )
     
     y_true, y_pred = evaluator(eval_data=valid_loader, model=model)
     print_reports(y_true, y_pred)
@@ -357,6 +390,7 @@ def eval_model_triplet_chead(eval_data: DataLoader,
 @torch.no_grad
 def eval_model_triplet_mapr(eval_data: DataLoader,
                             model: CodeSimSBertTripletENC):
+    model.eval()
     all_embs = []
     all_lbls = []
     for data in tqdm(eval_data):

@@ -2,7 +2,6 @@ import os
 import configparser
 import pandas as pd
 
-
 config = configparser.ConfigParser()
 config.read('paths.ini')
 DATA_PATH = config['DEFAULT']['DataPath']
@@ -24,10 +23,10 @@ def init_metadata_df(pid: str) -> pd.DataFrame | None:
         return None
     df: pd.DataFrame = pd.read_csv(path)
     # Filter the data:
-    df = df[['submission_id','status','language','user_id','date','accuracy']]
+    df = df[['problem_id', 'submission_id', 'status', 'language', 'user_id', 'date', 'accuracy']]
     df = df.loc['Python'  == df['language']]
     df = df.loc[1577836800 < df['date']]  # > 2020 jan 1
-    df = df[['submission_id','status']]
+    df = df[['problem_id', 'submission_id','status']]
     return df
 
 
