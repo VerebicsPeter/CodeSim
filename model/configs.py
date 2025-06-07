@@ -1,8 +1,6 @@
 from transformers import (
     AutoModel,
-    AutoTokenizer,
     PreTrainedModel,
-    PreTrainedTokenizerBase,
 )
 from dataclasses import dataclass, asdict
 
@@ -14,10 +12,10 @@ FINETUNING_STRATEGIES = {"binary_cls_simpl", "binary_cls_sbert"}
 class BaseConfig:
     pretrained_bert_name: str = "huggingface/CodeBERTa-small-v1"
     pretrained_bert: PreTrainedModel | None = None
-    tokenizer: PreTrainedTokenizerBase | None = None
     epochs: int = 4
-    # Batch size
-    bs: int = 20
+    num_workers: int = 0
+    num_rows: int | None = None
+    bs: int = 20  # batch size
     iters_to_accumulate: int = 2
     freeze_bert: bool = False  # NOTE: if true the BERT model is not finetuned
     
@@ -26,13 +24,10 @@ class BaseConfig:
         
         print(f"Pretrained checkpoint name: {self.pretrained_bert_name}")
         
-        if self.tokenizer is None:
-            print("Initializing tokenizer.")
-            self.tokenizer = AutoTokenizer.from_pretrained(self.pretrained_bert_name)
-        
         if self.pretrained_bert is None:
             print("Initializing bert model.")
             self.pretrained_bert = AutoModel.from_pretrained(self.pretrained_bert_name)
+            print("Initialized  bert model.")
 
 
 @dataclass
@@ -44,20 +39,16 @@ class BasicCodeSimClassifierConfig(BaseConfig):
     # Model specific parameters
     dropout_rate: float = 0.2
     shuffle_dataloader: bool = True
-    num_rows: int = 5000
 
 
 @dataclass
 class TripletCodeSimClassifierConfig(BaseConfig):
     # Learning rates and weight decays
-    lr_enc = 1e-5  # Encoder learning rate
-    wd_enc = 1e-5  # Encoder weight decay
-    lr_cls = 1e-3  # Classifier learning rate
-    wd_cls = 1e-3  # Classifier weight decay
+    lr_enc: float = 1e-5  # Encoder learning rate
+    wd_enc: float = 1e-5  # Encoder weight decay
     # Model specific parameters
     dropout_rate: float = 0.2
     shuffle_dataloader: bool = True
-    num_rows: int = 5000
     # Loss function hyperparameters
     margin: float = 1.0
     use_info_nce_inspired_loss: bool = False
@@ -73,7 +64,6 @@ class CombinedCodeSimClassifierConfig(BaseConfig):
     # Model specific parameters
     dropout_rate: float = 0.2
     shuffle_dataloader: bool = True
-    num_rows: int = 5000
     # Loss function hyperparameters
     margin: float = 1.0  # triplet loss function hyperparameter
     w_emb: float = 1.0  # loss component weight

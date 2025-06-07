@@ -77,8 +77,7 @@ def get_tokenizer(model: transformers.PreTrainedModel) -> transformers.PreTraine
 
 class Trainer(Protocol):
     # Returns train and validation losses in a tuple
-    def train(self, epochs: int, **kwargs) -> Tuple:
-        ...
+    def train(self, epochs: int, **kwargs) -> Tuple: ...
 
 
 class CodeSimLinearCLS(nn.Module):
@@ -125,31 +124,6 @@ class CodeSimSBertTripletENC(nn.Module):
         output: BaseModelOutputWithPooling = self.bert(**inputs)
         pooled_output = self.drop(self.pooling_strat(output, mask))
         return pooled_output
-
-
-class CodeSimSBertTripletCLS(nn.Module):
-    def __init__(self, embedding_size, hidden_sizes=(512,256), num_classes=2, dropout=0.2):
-        super().__init__()
-        self.embedding_size = embedding_size
-        # Size of concatenated emb1, emb2, distance(emb1, emb2)
-        input_size = 2*embedding_size+1
-        # Classifier head
-        self.cls_head = nn.Sequential(
-            nn.Linear(input_size,
-                      hidden_sizes[0]),
-            nn.ReLU(), nn.Dropout(dropout),
-            nn.Linear(hidden_sizes[0],
-                      hidden_sizes[1]),
-            nn.ReLU(), nn.Dropout(dropout),
-            nn.Linear(hidden_sizes[1],
-                      num_classes),
-        )
-    
-    def forward(self, emb_1, emb_2) -> torch.Tensor:
-        d = (1 - F.cosine_similarity(emb_1, emb_2, dim=1)).unsqueeze(dim=1)  # cosine distance
-        h = torch.cat([emb_1, emb_2, d], dim=1)  # input feature vector
-        logits = self.cls_head(h)
-        return logits
 
 
 class CodeSimSBertLinearCLS(nn.Module):
@@ -210,7 +184,7 @@ class CodeSimCombinedModel(nn.Module):
 
         encoder_dim = bert.config.hidden_size
         # Projection head for contrastive learning task (for meaningfull embeddings)
-        self.emb_head = self._create_mlp(encoder_dim, *emb_head_hidden_sizes, emb_head_output_size)
+        self.emb_head = self._create_mlp(  encoder_dim, *emb_head_hidden_sizes, emb_head_output_size)
         # Classification head for multiclass tasks
         # NOTE: input size is 3*encoder_dim, see SBERT classification method for explanation
         self.cls_head = self._create_mlp(3*encoder_dim, *cls_head_hidden_sizes, cls_head_num_classes)

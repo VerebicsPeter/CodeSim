@@ -6,8 +6,7 @@ import random
 #import datasets
 import transformers
 import torch
-from torch.utils.data import Dataset
-from typing import Iterable
+from torch.utils.data import Dataset, DataLoader, Subset
 from collections import defaultdict
 
 
@@ -31,32 +30,71 @@ DATASET_URLS = {
 }
 
 
-def download_dataset(url, output_file):
-    gdown.download(url, output_file, quiet=False)
+def get_tokenizer_params(max_length: int):
+    return {
+        "padding": "max_length",  # Pad to max_length
+        "max_length": max_length,
+        "truncation": True,  # Truncate to max_length
+        "return_tensors": "pt",  # Return torch.Tensor objects
+    }
 
 
-def get_batch_encodings(
-    codes: Iterable[str],
-    tokenizer: transformers.PreTrainedTokenizer | transformers.PreTrainedTokenizerFast,
-    device: str = "cpu",
-) -> transformers.BatchEncoding:
-    MODEL_MAX_LEN = tokenizer.model_max_length
+def split_df(df: pd.DataFrame, train_ratio=0.8, valid_ratio=0.1, test_ratio=0.1, random_state=42):
+    assert train_ratio + valid_ratio + test_ratio == 1.0, "Ratios must sum to 1"
+    # Initializes empty lists to collect split data
+    dfs = defaultdict(list)
+    
+    # Shuffle and split each class separately
+    for problem_id, group in df.groupby("problem_id"):
+        group = group.sample(frac=1, random_state=random_state)  # shuffle
+        
+        n_total = len(group)
+        n_train = int(n_total * train_ratio)
+        n_valid = int(n_total * valid_ratio)
 
-    inputs = tokenizer(
-        codes,
-        truncation=True,
-        # Pad to "MAX_LEN + 1" to detect sequences that are too long
-        padding="max_length",
-        max_length=MODEL_MAX_LEN + 1,
-        return_tensors="pt",
-    )
+        train = group.iloc[:n_train]
+        valid = group.iloc[ n_train:
+                           n_train + n_valid]
+        test  = group.iloc[n_train + n_valid:]
 
-    # Mask out sequences that are longer than `MODEL_MAX_LEN`
-    l_mask = inputs["attention_mask"].sum(dim=1) <= MODEL_MAX_LEN
-    inputs = {k: v[l_mask, :MODEL_MAX_LEN] for k, v in inputs.items()}
-    # Move tensors to the specified device
-    inputs = {k: v.to(device) for k, v in inputs.items()}
-    return inputs
+        dfs["train"].append(train)
+        dfs["valid"].append(valid)
+        dfs["test"].append(test)
+
+    train_df = pd.concat(dfs["train"]).sample(frac=1, random_state=random_state).reset_index(drop=True)
+    valid_df = pd.concat(dfs["valid"]).sample(frac=1, random_state=random_state).reset_index(drop=True)
+    test_df = pd.concat(dfs["test"]).sample(frac=1, random_state=random_state).reset_index(drop=True)
+    return train_df, valid_df, test_df
+
+
+def load_dataset(url=DATASET_URL, columns=COLUMNS):
+    output = "dataset.csv"
+    gdown.download(url=url, output=output, quiet=False)
+    df = pd.read_csv("dataset.csv", header=0, names=columns)
+    pp.pp(df.describe())
+    print("Splitting dataset...")
+    train_df, valid_df, test_df = split_df(df)
+    print(f"Train size: {len(train_df)}, Valid size: {len(valid_df)}, Test size: {len(test_df)}")
+    return train_df, valid_df, test_df
+
+
+def get_loaders(train_data, valid_data, test_data, bs, shuffle, num_workers=4, num_rows=None):
+    if num_rows is not None:
+        train_data = Subset(train_data, range(num_rows))
+        valid_data = Subset(valid_data, range(num_rows))
+        test_data  = Subset(test_data, range(num_rows))
+    
+    train_loader = DataLoader(train_data, batch_size=bs, shuffle=shuffle, num_workers=num_workers)
+    valid_loader = DataLoader(valid_data, batch_size=bs, shuffle=False, num_workers=num_workers)
+    test_loader  = DataLoader( test_data, batch_size=bs, shuffle=False, num_workers=num_workers)
+    return train_loader, valid_loader, test_loader
+
+
+def encode_tuple(t: tuple[str], tokenizer, tokenizer_params):
+    encodings = tokenizer(t, **tokenizer_params)
+    # return tuple of encodings (used in default collate_fn)
+    return tuple({k: v[i] for k,v in encodings.items()} for i in range(len(t)))
+
 
 # TODO: augment pairs by flipping the order of the pair
 class CodeNetPairDataset(Dataset):
@@ -64,12 +102,8 @@ class CodeNetPairDataset(Dataset):
 
     def __init__(
         self,
-        pids,
-        pairs,
-        labels,
-        tokenizer: (
-            transformers.PreTrainedTokenizer | transformers.PreTrainedTokenizerFast
-        ),
+        pids, pairs, labels,
+        tokenizer_name: str,
         tokenizer_max_length: int = 256,
         return_single_encoding: bool = True,
     ):
@@ -77,24 +111,13 @@ class CodeNetPairDataset(Dataset):
         
         assert len(pids) == len(pairs) == len(labels), "Length MUST match!"
         self.pids = pids
-        
-        self.pid_to_idx = defaultdict(list)
-        for idx, pid in enumerate(pids): self.pid_to_idx[pid].append(idx)
-        
         self.pairs = pairs
         self.labels = labels
-        
-        self.tokenizer = tokenizer
-        self.tokenizer_params = {
-            "padding":'max_length',  # Pad to max_length
-            "max_length": tokenizer_max_length,
-            "truncation":True,       # Truncate to max_length
-            "return_tensors":'pt'    # Return torch.Tensor objects
-        }
         self.return_single_encoding = return_single_encoding
         
+        self.tokenizer = transformers.AutoTokenizer.from_pretrained(tokenizer_name)
+        self.tokenizer_params = get_tokenizer_params(tokenizer_max_length)
         self.encoded_pairs = [self._encode_pair(pair) for pair in pairs]
-        
 
     def _encode_pair(self, pair):
         code_a, code_b = pair
@@ -104,16 +127,11 @@ class CodeNetPairDataset(Dataset):
             encoding = self.tokenizer(code_a, code_b, **self.tokenizer_params)
             return {k: v.squeeze(0) for k, v in encoding.items()}
         else:
-            encodings = self.tokenizer([code_a, code_b], **self.tokenizer_params)
-            return (
-                {k: v[0] for k,v in encodings.items()},
-                {k: v[1] for k,v in encodings.items()}
-            )
-    
+            encodings = encode_tuple(pair, self.tokenizer, self.tokenizer_params)
+            return encodings
     
     def __getitem__(self, idx):
         label = self.labels[idx]
-        
         encoding = self.encoded_pairs[idx]
         if self.return_single_encoding:
             return  encoding, label
@@ -127,29 +145,27 @@ class CodeNetPairDataset(Dataset):
     def from_pandas_df(
         cls,
         df: pd.DataFrame,
-        tokenizer,
+        tokenizer_name: str,
         tokenizer_max_length: int = 256,
         return_single_encoding: bool = True,
     ):
         pids, pairs, labels = [], [], []
         
         for pid, group_df in df.groupby("problem_id"):
-            assert (group_df[:200]["status"] == "Accepted").all()
-            assert (group_df[200:]["status"] != "Accepted").all()
-            
-            anchors = group_df[:100]["code"].to_list()
-            positives = group_df[100:200]["code"].to_list()
-            negatives = group_df[200:300]["code"].to_list()
-            
-            assert len(anchors) == len(positives) == len(negatives), "Lengths MUST match!"
-            
-            pids.extend([pid] * len(anchors)*2)
-            
-            pairs.extend([*zip(anchors, positives), *zip(anchors, negatives)])
-            
-            labels.extend([1] * len(anchors) + [0] * len(anchors))
+            df_pos = group_df[group_df["status"] == "Accepted"]
+            df_neg = group_df[group_df["status"] != "Accepted"]
+            positives = df_pos["code"].to_list()
+            negatives = df_neg["code"].to_list()
+            n = min(len(positives), len(negatives))
+            if n == 0: continue
+            #print("sampled:", n, "pairs for problem ID:", pid)
+            positives = positives[:n]
+            negatives = negatives[:n]
+            pids.extend([pid] * 2 * n)
+            pairs.extend([*zip(positives, reversed(positives)), *zip(positives, negatives)])
+            labels.extend([1] * n + [0] * n)
         
-        return cls(pids, pairs, labels, tokenizer, tokenizer_max_length, return_single_encoding)
+        return cls(pids, pairs, labels, tokenizer_name, tokenizer_max_length, return_single_encoding)
 
 
 class CodeNetTripletDataset(Dataset):
@@ -157,42 +173,24 @@ class CodeNetTripletDataset(Dataset):
 
     def __init__(
         self,
-        pids,
-        triplets,
-        tokenizer: (
-            transformers.PreTrainedTokenizer | transformers.PreTrainedTokenizerFast
-        ),
+        pids, triplets,
+        tokenizer_name: str,
         tokenizer_max_length: int = 256,
     ):
         super().__init__()
         
         assert len(pids) == len(triplets), "Length MUST match!"
         self.pids = pids
-        
-        self.pid_to_idx = defaultdict(list)
-        for idx, pid in enumerate(pids): self.pid_to_idx[pid].append(idx)
-        
         self.triplets = triplets
         
-        self.tokenizer = tokenizer
-        self.tokenizer_params = {
-            "padding": "max_length",  # Pad to max_length
-            "max_length": tokenizer_max_length,
-            "truncation": True,  # Truncate to max_length
-            "return_tensors": "pt",  # Return torch.Tensor objects
-        }
-        
+        self.tokenizer = transformers.AutoTokenizer.from_pretrained(tokenizer_name)
+        self.tokenizer_params = get_tokenizer_params(tokenizer_max_length)
         self.encoded_triplets = [self._encode_triplet(triplet) for triplet in triplets]
-    
-    
+
     def _encode_triplet(self, triplet):
-        code_a, code_p, code_n = triplet
-        encodings = self.tokenizer([code_a, code_p, code_n], **self.tokenizer_params)
-        return (
-            {k: v[0] for k,v in encodings.items()},
-            {k: v[1] for k,v in encodings.items()},
-            {k: v[2] for k,v in encodings.items()}
-        )
+        anchor, positive, negative = triplet
+        encodings = encode_tuple((anchor, positive, negative), self.tokenizer, self.tokenizer_params)
+        return encodings
 
     def __getitem__(self, idx):
         # Return the tokenized encodings
@@ -206,25 +204,25 @@ class CodeNetTripletDataset(Dataset):
     def from_pandas_df(
         cls,
         df: pd.DataFrame,
-        tokenizer,
+        tokenizer_name: str,
         tokenizer_max_length: int = 256,
     ):
         pids, triplets = [], []
         
         for pid, group_df in df.groupby("problem_id"):
-            assert (group_df[:200]["status"] == "Accepted").all()
-            assert (group_df[200:]["status"] != "Accepted").all()
-            
-            anchors = group_df[:100]["code"].to_list()
-            positives = group_df[100:200]["code"].to_list()
-            negatives = group_df[200:300]["code"].to_list()
-            
-            assert len(anchors) == len(positives) == len(negatives), "Lengths MUST match!"
-            
-            pids.extend([pid] * len(anchors))
-            triplets.extend(zip(anchors, positives, negatives))
+            df_pos = group_df[group_df["status"] == "Accepted"]
+            df_neg = group_df[group_df["status"] != "Accepted"]
+            positives = df_pos["code"].to_list()
+            pos1 = positives[:len(positives)//2 ]
+            pos2 = positives[ len(positives)//2:]
+            negatives = df_neg["code"].to_list()
+            n = min(len(pos1), len(pos2), len(negatives))
+            if n == 0: continue
+            #print("sampled:", n, "triplets for problem ID:", pid)
+            pids.extend([pid] * n)
+            triplets.extend(zip(pos1[:n], pos2[:n], negatives[:n]))
 
-        return cls(pids, triplets, tokenizer, tokenizer_max_length)
+        return cls(pids, triplets, tokenizer_name, tokenizer_max_length)
 
 
 class CodeNetRandomTripletDataset(Dataset):
@@ -232,125 +230,102 @@ class CodeNetRandomTripletDataset(Dataset):
 
     def __init__(
         self,
-        pids,
-        positives,
-        negatives,
-        pid_to_pos,
-        pid_to_neg,
-        tokenizer: (
-            transformers.PreTrainedTokenizer | transformers.PreTrainedTokenizerFast
-        ),
+        # NOTE: PID contains the list of problem IDs to sample in an epoch
+        pids, pid_to_pos, pid_to_neg,
+        tokenizer_name: str,
         tokenizer_max_length: int = 256,
     ):
         super().__init__()
-        
-        assert len(pids) == len(positives), "Length MUST match!"
         self.pids = pids
-        self.positives = positives
-        self.negatives = negatives
         self.pid_to_pos = pid_to_pos
         self.pid_to_neg = pid_to_neg
+        self.pid_to_idx = {pid: i for i, pid in enumerate(pids)}
         
-        self.tokenizer = tokenizer
-        self.tokenizer_params = {
-            "padding": "max_length",  # Pad to max_length
-            "max_length": tokenizer_max_length,
-            "truncation": True,  # Truncate to max_length
-            "return_tensors": "pt",  # Return torch.Tensor objects
-        }
+        self.tokenizer = transformers.AutoTokenizer.from_pretrained(tokenizer_name)
+        self.tokenizer_params = get_tokenizer_params(tokenizer_max_length)
 
     def __getitem__(self, idx):
         pid = self.pids[idx]
-        anchor = self.positives[idx]
+        anchor = random.choice(self.pid_to_pos[pid])
+        # NOTE: achor and postive may be the same code, see SimCSE paper
         positive = random.choice(self.pid_to_pos[pid])
         negative = random.choice(self.pid_to_neg[pid])
-        encodings = self.tokenizer([anchor, positive, negative], **self.tokenizer_params)
-        # Remove batch dimensions
-        enc_a = {k: v[0] for k, v in encodings.items()}
-        enc_p = {k: v[1] for k, v in encodings.items()}
-        enc_n = {k: v[2] for k, v in encodings.items()}
+        enc_a, enc_p, enc_n = encode_tuple((anchor, positive, negative), self.tokenizer, self.tokenizer_params)
         return enc_a, enc_p, enc_n
 
     def __len__(self):
-        return len(self.positives)
+        return len(self.pids)
 
     @classmethod
     def from_pandas_df(
         cls,
         df: pd.DataFrame,
-        tokenizer,
+        tokenizer_name: str,
         tokenizer_max_length: int = 256,
     ):
-        pids, pos, neg = [], [], []
+        pids = []
         pid_to_pos = {}
         pid_to_neg = {}
         
         for pid, group_df in df.groupby("problem_id"):
-            assert (group_df[:200]["status"] == "Accepted").all()
-            assert (group_df[200:]["status"] != "Accepted").all()
-            positives = group_df[:200]["code"].to_list()
-            negatives = group_df[200:]["code"].to_list()
-            pos.extend(positives)
-            neg.extend(negatives)
+            df_pos = group_df[group_df["status"] == "Accepted"]
+            df_neg = group_df[group_df["status"] != "Accepted"]
+            positives = df_pos["code"].to_list()
+            negatives = df_neg["code"].to_list()
             pids.extend([pid] * len(positives))
             pid_to_pos[pid] = positives
             pid_to_neg[pid] = negatives
 
-        return cls(pids, pos, neg, pid_to_pos, pid_to_neg, tokenizer, tokenizer_max_length)
+        return cls(pids, pid_to_pos, pid_to_neg, tokenizer_name, tokenizer_max_length)
 
 
 def Create_CodeNet_paired_dataset(
-    tokenizer,
+    tokenizer_name: str,
     tokenizer_max_length=256,
     data_path=DATASET_URL,
     return_single_encoding=True,
 ):
-    download_dataset(data_path, "dataset.csv")
-    df = pd.read_csv("dataset.csv", header=0, names=COLUMNS)
-    #df = pd.read_csv(DATASET_URL, header=0, names=COLUMNS)  # FOR TESTING
-    print("CodeNet data loaded. Data type: paired")
-    pp.pp(df)
+    print("Creating CodeNet dataset. Data type: paired")
+    train_df, valid_df, test_df = load_dataset(url=data_path)
     
-    dataset = CodeNetPairDataset.from_pandas_df(
-        df,
-        tokenizer=tokenizer,
-        tokenizer_max_length=tokenizer_max_length,
-        return_single_encoding=return_single_encoding,
-    )
-    return dataset
+    _kwargs = {
+        "tokenizer_name": tokenizer_name,
+        "tokenizer_max_length": tokenizer_max_length,
+        "return_single_encoding": return_single_encoding,
+    }
+    
+    train_ds = CodeNetPairDataset.from_pandas_df(train_df, **_kwargs)
+    valid_ds = CodeNetPairDataset.from_pandas_df(valid_df, **_kwargs)
+    test_ds = CodeNetPairDataset.from_pandas_df(test_df, **_kwargs)
+    return train_ds, valid_ds, test_ds
 
 
 def Create_CodeNet_triplet_dataset(
-    tokenizer,
+    tokenizer_name,
     tokenizer_max_length=256,
     data_path=DATASET_URL,
 ):
-    download_dataset(data_path, "dataset.csv")
-    df = pd.read_csv("dataset.csv", header=0, names=COLUMNS)
-    #df = pd.read_csv(DATASET_URL, header=0, names=COLUMNS)  # FOR TESTING 
-    print("CodeNet data loaded. Data type: triplet")
-    pp.pp(df)
-
-    dataset = CodeNetRandomTripletDataset.from_pandas_df(
-        df,
-        tokenizer=tokenizer,
-        tokenizer_max_length=tokenizer_max_length,
-    )
-    return dataset
+    print("Creating CodeNet dataset. Data type: triplet")
+    train_df, valid_df, test_df = load_dataset(url=data_path)
+    
+    _kwargs = {
+        "tokenizer_name": tokenizer_name,
+        "tokenizer_max_length": tokenizer_max_length,
+    }
+    
+    train_ds = CodeNetRandomTripletDataset.from_pandas_df(train_df, **_kwargs)
+    valid_ds = CodeNetTripletDataset.from_pandas_df(valid_df, **_kwargs)
+    test_ds = CodeNetTripletDataset.from_pandas_df(test_df, **_kwargs)
+    return train_ds, valid_ds, test_ds
 
 
 class POJDataset(Dataset):
     """Simple wrapper for the dataset 'semeru/Code-Code-CloneDetection-POJ104'"""
     
-    def __init__(self, poj_dataset, tokenizer: (transformers.PreTrainedTokenizer | transformers.PreTrainedTokenizerFast)):
-        self.tokenizer = tokenizer
-        self.tokenizer_params = {
-            "padding": "max_length",  # Pad to max_length
-            "max_length": self.tokenizer.model_max_length,
-            "truncation": True,  # Truncate to max_length
-            "return_tensors": "pt",  # Return torch.Tensor objects
-        }
+    def __init__(self, poj_dataset, tokenizer_name: str):
         self.dataset = poj_dataset
+        self.tokenizer = transformers.AutoTokenizer.from_pretrained(tokenizer_name)
+        self.tokenizer_params = get_tokenizer_params(self.tokenizer.model_max_length)
 
     def __getitem__(self, idx):
         item = self.dataset[idx]
@@ -366,19 +341,14 @@ class POJDataset(Dataset):
 class POJ104TripletDataset(Dataset):
     """Simple wrapper for sampling triplets from the dataset 'semeru/Code-Code-CloneDetection-POJ104'"""
     
-    def __init__(self, poj_dataset, tokenizer: (transformers.PreTrainedTokenizer | transformers.PreTrainedTokenizerFast)):
+    def __init__(self, poj_dataset, tokenizer_name: str):
         self.dataset = poj_dataset
         self.lbl_to_idx = defaultdict(list)
         for idx, item in enumerate(poj_dataset):
             self.lbl_to_idx[item["label"]].append(idx)
         self.labels = list(self.lbl_to_idx.keys())
-        self.tokenizer = tokenizer
-        self.tokenizer_params = {
-            "padding": "max_length",  # Pad to max_length
-            "max_length": self.tokenizer.model_max_length,
-            "truncation": True,  # Truncate to max_length
-            "return_tensors": "pt",  # Return torch.Tensor objects
-        }
+        self.tokenizer = transformers.AutoTokenizer.from_pretrained(tokenizer_name)
+        self.tokenizer_params = get_tokenizer_params(self.tokenizer.model_max_length)
 
     # TODO: maybe seed this explicitly...
     def __getitem__(self, idx):
@@ -398,11 +368,7 @@ class POJ104TripletDataset(Dataset):
 
         code_a, code_p, code_n = anchor["code"], positive["code"], negative["code"]
         # Encode the sequences for sequence pair similarity
-        encodings = self.tokenizer([code_a, code_p, code_n], **self.tokenizer_params)
-        # Remove batch dimensions
-        enc_a = {k: v[0] for k, v in encodings.items()}
-        enc_p = {k: v[1] for k, v in encodings.items()}
-        enc_n = {k: v[2] for k, v in encodings.items()}
+        enc_a, enc_p, enc_n = encode_tuple((code_a, code_p, code_n), self.tokenizer, self.tokenizer_params)
         # Return the tokenized encodings
         return enc_a, enc_p, enc_n
 
@@ -410,10 +376,10 @@ class POJ104TripletDataset(Dataset):
         return len(self.dataset)
 
 
-def Create_POJ104_triplet_dataset(tokenizer):
+def Create_POJ104_triplet_dataset(tokenizer_name: str):
     poj_dataset = datasets.load_dataset("semeru/Code-Code-CloneDetection-POJ104")
-    train_dataset = POJ104TripletDataset(poj_dataset["train"], tokenizer)
-    valid_dataset = POJ104TripletDataset(poj_dataset["validation"], tokenizer)
-    test_dataset_map = POJDataset(poj_dataset["test"], tokenizer)
-    test_dataset_cls = POJ104TripletDataset(poj_dataset["test"], tokenizer)
+    train_dataset = POJ104TripletDataset(poj_dataset["train"], tokenizer_name)
+    valid_dataset = POJ104TripletDataset(poj_dataset["validation"], tokenizer_name)
+    test_dataset_map = POJDataset(poj_dataset["test"], tokenizer_name)
+    test_dataset_cls = POJ104TripletDataset(poj_dataset["test"], tokenizer_name)
     return train_dataset, valid_dataset, test_dataset_map, test_dataset_cls
