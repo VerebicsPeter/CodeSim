@@ -71,7 +71,7 @@ def load_dataset(url=DATASET_URL, columns=COLUMNS):
     output = "dataset.csv"
     gdown.download(url=url, output=output, quiet=False)
     df = pd.read_csv("dataset.csv", header=0, names=columns)
-    pp.pp(df.describe())
+    print('\n', df.describe(), '\n')
     print("Splitting dataset...")
     train_df, valid_df, test_df = split_df(df)
     print(f"Train size: {len(train_df)}, Valid size: {len(valid_df)}, Test size: {len(test_df)}")
@@ -231,15 +231,17 @@ class CodeNetRandomTripletDataset(Dataset):
     def __init__(
         self,
         # NOTE: PID contains the list of problem IDs to sample in an epoch
-        pids, pid_to_pos, pid_to_neg,
+        pid_to_pos,
+        pid_to_neg,
         tokenizer_name: str,
         tokenizer_max_length: int = 256,
+        num_passes: int = 2,
     ):
         super().__init__()
-        self.pids = pids
+        all_pids = set(pid_to_pos.keys()) | set(pid_to_neg.keys())
+        self.pids = list(all_pids) * num_passes
         self.pid_to_pos = pid_to_pos
         self.pid_to_neg = pid_to_neg
-        self.pid_to_idx = {pid: i for i, pid in enumerate(pids)}
         
         self.tokenizer = transformers.AutoTokenizer.from_pretrained(tokenizer_name)
         self.tokenizer_params = get_tokenizer_params(tokenizer_max_length)
@@ -263,7 +265,6 @@ class CodeNetRandomTripletDataset(Dataset):
         tokenizer_name: str,
         tokenizer_max_length: int = 256,
     ):
-        pids = []
         pid_to_pos = {}
         pid_to_neg = {}
         
@@ -272,11 +273,10 @@ class CodeNetRandomTripletDataset(Dataset):
             df_neg = group_df[group_df["status"] != "Accepted"]
             positives = df_pos["code"].to_list()
             negatives = df_neg["code"].to_list()
-            pids.extend([pid] * len(positives))
             pid_to_pos[pid] = positives
             pid_to_neg[pid] = negatives
 
-        return cls(pids, pid_to_pos, pid_to_neg, tokenizer_name, tokenizer_max_length)
+        return cls(pid_to_pos, pid_to_neg, tokenizer_name, tokenizer_max_length)
 
 
 def Create_CodeNet_paired_dataset(

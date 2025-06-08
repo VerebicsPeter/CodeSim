@@ -27,7 +27,6 @@ class BaseConfig:
         if self.pretrained_bert is None:
             print("Initializing bert model.")
             self.pretrained_bert = AutoModel.from_pretrained(self.pretrained_bert_name)
-            print("Initialized  bert model.")
 
 
 @dataclass
