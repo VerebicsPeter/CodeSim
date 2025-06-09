@@ -149,16 +149,17 @@ def finetune_model_triplet(config: configs.TripletCodeSimClassifierConfig, use_p
         test_loader_map = DataLoader(test_dataset_map, batch_size=config.bs, shuffle=config.shuffle_dataloader)
         test_loader_cls = DataLoader(test_dataset_cls, batch_size=config.bs, shuffle=config.shuffle_dataloader)
     else:
+        num_passes = config.num_rows if config.num_rows is not None else 200
         train_data, valid_data, test_data = code_sim_datasets.Create_CodeNet_triplet_dataset(
             tokenizer_name=config.pretrained_bert_name,
             tokenizer_max_length=256,
+            num_passes=num_passes,
         )
         train_loader, valid_loader, test_loader = code_sim_datasets.get_loaders(
             train_data, valid_data, test_data,
             config.bs,
             config.shuffle_dataloader,
             config.num_workers,
-            config.num_rows,
         )
 
     # Model Creation
