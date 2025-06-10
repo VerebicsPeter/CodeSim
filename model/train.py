@@ -136,7 +136,10 @@ def finetune_model_triplet(config: configs.TripletCodeSimClassifierConfig, use_p
     if not config.use_info_nce_inspired_loss:
         loss_hook = code_sim_models.compute_loss_triplet
     else:
-        loss_hook = code_sim_models.compute_loss_triplet_2
+        loss_hook = lambda trainer, batched_data: code_sim_models.compute_loss_triplet_2(
+            trainer, batched_data,
+            config.temp, config.amp_factor
+        )
     
     # Dataset Creation
     if use_poj:
@@ -205,7 +208,6 @@ def finetune_model_combined(config: configs.CombinedCodeSimClassifierConfig):
         tokenizer_name=config.pretrained_bert_name,
         tokenizer_max_length=256,
         num_passes=num_passes,
-        
     )
     train_loader, valid_loader, _ = code_sim_datasets.get_loaders(
         train_data, valid_data, test_data,

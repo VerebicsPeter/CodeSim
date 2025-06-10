@@ -23,6 +23,7 @@ from typing import Callable, Protocol, Tuple
 # - a mean pooled version of the last hidden states
 # - a max pooled version of the last hidden states
 # - an attention pooled version of the last hidden states
+# TODO: RNN (GRU) based pooling strategy
 PoolingStrategy = Callable[[BaseModelOutputWithPooling, torch.Tensor], torch.Tensor]
 
 
@@ -385,13 +386,12 @@ def compute_loss_triplet(trainer: CodeSimilarityTrainer, batched_data):
     # Converting to cuda tensors if needed
     inputs = {key: torch.cat([encs_a[key], encs_p[key], encs_n[key]]) for key in encs_a}
     put_batch_encoding_to_device(inputs, trainer.device)
-    
     embs = trainer.model(inputs)
     embs_a, embs_p, embs_n = embs.split(batch_size)
     return trainer.loss_func(embs_a, embs_p, embs_n)
 
 
-def compute_loss_triplet_2(trainer: CodeSimilarityTrainer, batched_data, temp=0.05):
+def compute_loss_triplet_2(trainer: CodeSimilarityTrainer, batched_data, temp=0.05, amp_factor=1.0):
     """
     Loss strategy for finetuning BERT.
 
@@ -418,6 +418,10 @@ def compute_loss_triplet_2(trainer: CodeSimilarityTrainer, batched_data, temp=0.
     embs = F.normalize(embs, dim=1)  # normalize to align with cosine similarity
     A, POS, NEG = embs.split(batch_size)
     Q = torch.cat([POS, NEG], dim=0)
+    
+    # Amplify hard negatives by multiplying with a factor
+    Q.diag(batch_size).mul_(amp_factor)
+    
     logits = A @ Q.T / temp
     labels = torch.arange(batch_size, device=trainer.device)
     
