@@ -130,16 +130,13 @@ def finetune_model(config: configs.BasicCodeSimClassifierConfig):
 def finetune_model_triplet(config: configs.TripletCodeSimClassifierConfig, use_poj=False):
     config.post_init()  # init models if needed
     
-    distance_function = lambda x, y: 1 - F.cosine_similarity(x, y)
-    loss_func = nn.TripletMarginWithDistanceLoss(distance_function=distance_function, margin=config.margin)
-    
-    if not config.use_info_nce_inspired_loss:
-        loss_hook = code_sim_models.compute_loss_triplet
+    if config.use_info_nce_inspired_loss:
+        loss_func = None  # TODO: maybe make a custom loss for the hardcoded loss in method below
+        loss_hook = lambda trainer, batched_data: code_sim_models.compute_loss_tuplet(trainer, batched_data, config.temp)
     else:
-        loss_hook = lambda trainer, batched_data: code_sim_models.compute_loss_triplet_2(
-            trainer, batched_data,
-            config.temp, config.amp_factor
-        )
+        distance_function = lambda x, y: 1 - F.cosine_similarity(x, y)
+        loss_func = nn.TripletMarginWithDistanceLoss(distance_function=distance_function, margin=config.margin)
+        loss_hook = code_sim_models.compute_loss_triplet
     
     # Dataset Creation
     if use_poj:
@@ -153,10 +150,13 @@ def finetune_model_triplet(config: configs.TripletCodeSimClassifierConfig, use_p
         test_loader_cls = DataLoader(test_dataset_cls, batch_size=config.bs, shuffle=config.shuffle_dataloader)
     else:
         num_passes = config.num_rows if config.num_rows is not None else 200
+        print(f"Number of passes per problem: {num_passes}")
+        
         train_data, valid_data, test_data = code_sim_datasets.Create_CodeNet_triplet_dataset(
             tokenizer_name=config.pretrained_bert_name,
             tokenizer_max_length=256,
             num_passes=num_passes,
+            num_negatives=config.num_negatives
         )
         train_loader, valid_loader, test_loader = code_sim_datasets.get_loaders(
             train_data, valid_data, test_data,

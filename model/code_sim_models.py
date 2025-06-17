@@ -382,16 +382,17 @@ def compute_loss_logit_SBert(trainer: CodeSimilarityTrainer, batched_data):
 def compute_loss_triplet(trainer: CodeSimilarityTrainer, batched_data):
     """Loss strategy for finetuning BERT."""
     encs_a, encs_p, encs_n = batched_data
+    encs_n = encs_n[0]  # only use the first negatives
     batch_size = encs_a["input_ids"].shape[0]
     # Converting to cuda tensors if needed
-    inputs = {key: torch.cat([encs_a[key], encs_p[key], encs_n[key]]) for key in encs_a}
+    inputs = { key: torch.cat([encs_a[key], encs_p[key], encs_n[key]]) for key in encs_a }
     put_batch_encoding_to_device(inputs, trainer.device)
     embs = trainer.model(inputs)
     embs_a, embs_p, embs_n = embs.split(batch_size)
     return trainer.loss_func(embs_a, embs_p, embs_n)
 
 
-def compute_loss_triplet_2(trainer: CodeSimilarityTrainer, batched_data, temp=0.05, amp_factor=1.0):
+def compute_loss_tuplet(trainer: CodeSimilarityTrainer, batched_data, temp=0.05):
     """
     Loss strategy for finetuning BERT.
 
@@ -399,31 +400,41 @@ def compute_loss_triplet_2(trainer: CodeSimilarityTrainer, batched_data, temp=0.
     
     `a,p,n` solutions for each problem (`a,p` passing and `n` failing)
     
-    computes the loss on the embeddings of solutions as follows:
+    Computes the loss on the embeddings of solutions as follows:
     1. Concatenate the embeddings of `p`, `n` solutions (`Q`).
     2. Compute the cosine similarities between the anchors and `Q`.
     3. Scale the cosine similarities by `temp` to obtain logits.
     4. Compute the cross-entropy loss between the logits and labels.
+    
+    NOTE:  
+    This **requires** the batched tuplets to be from **different problems**.  
+    If the some tuplets are from the same problem then labels are incorrect.
     """
-    # NOTE: (IMPORTANT)
-    # This REQUIRES the batched triplets to be from DIFFERENT problems!
-    # If the some triplets are from the same problem then labels are incorrect.
+    
+    """
+    NOTE: Multiple hard negatives are supported now. eg.:
+        p_1 p_2 p_3 n_11 n_12 n_13 n_22 n_23 n_23 n_31 n_32 n_33
+    a_1  ^   .   .   .    .    .    .    .    .    .    .    .
+    a_2  .   ^   .   .    .    .    .    .    .    .    .    .
+    a_3  .   .   ^   .    .    .    .    .    .    .    .    .
+    """
     # TODO: Make temp a learnable parameter
-    encs_a, encs_p, encs_n = batched_data
-    batch_size = encs_a["input_ids"].shape[0]
-    inputs = {key: torch.cat([encs_a[key], encs_p[key], encs_n[key]]) for key in encs_a}
+    
+    enc_a, enc_p, encs_n = batched_data
+    N = enc_a["input_ids"].shape[0]  # batch size
+    
+    inputs = {key: torch.cat([enc_a[key], enc_p[key], *(enc_n[key] for enc_n in encs_n)]) for key in enc_a}
     put_batch_encoding_to_device(inputs, trainer.device)
     
     embs = trainer.model(inputs)
     embs = F.normalize(embs, dim=1)  # normalize to align with cosine similarity
-    A, POS, NEG = embs.split(batch_size)
+    
+    A, POS, NEG = embs.split((N, N, embs.size(0)-2*N))
+    
     Q = torch.cat([POS, NEG], dim=0)
     
-    # Amplify hard negatives by multiplying with a factor
-    Q.diag(batch_size).mul_(amp_factor)
-    
     logits = A @ Q.T / temp
-    labels = torch.arange(batch_size, device=trainer.device)
+    labels = torch.arange(N, device=trainer.device)
     
     return F.cross_entropy(logits, labels)
 
@@ -431,12 +442,13 @@ def compute_loss_triplet_2(trainer: CodeSimilarityTrainer, batched_data, temp=0.
 def compute_loss_combined(trainer: CodeSimilarityTrainer, batched_data):
     """Loss strategy for finetuning BERT."""
     encs_a, encs_p, encs_n = batched_data
+    encs_n = encs_n[0]  # only use the first negatives
     batch_size = encs_a["input_ids"].shape[0]
     # create labels for binary classification
     labels_p = torch.full((batch_size,),1)
     labels_n = torch.full((batch_size,),0)
     labels = torch.cat([labels_p,labels_n], dim=0)
-    inputs = { key: torch.cat([encs_a[key], encs_p[key], encs_n[key]]) for key in encs_a.keys()}
+    inputs = { key: torch.cat([encs_a[key], encs_p[key], encs_n[key]]) for key in encs_a.keys() }
     put_batch_encoding_to_device(inputs, trainer.device)
     embs, logits = trainer.model.forward_train(inputs)
     embs_a, embs_p, embs_n = embs.split(batch_size)

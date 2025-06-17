@@ -237,12 +237,14 @@ class CodeNetRandomTripletDataset(Dataset):
         tokenizer_name: str,
         tokenizer_max_length: int = 256,
         num_passes: int = 200,
+        num_negatives: int = 1, # number of same problem (hard) negatives
     ):
         super().__init__()
         all_pids = set(pid_to_pos.keys()) | set(pid_to_neg.keys())
         self.pids = list(all_pids) * num_passes
         self.pid_to_pos = pid_to_pos
         self.pid_to_neg = pid_to_neg
+        self.num_negatives = num_negatives
         
         self.tokenizer = transformers.AutoTokenizer.from_pretrained(tokenizer_name)
         self.tokenizer_params = get_tokenizer_params(tokenizer_max_length)
@@ -261,10 +263,11 @@ class CodeNetRandomTripletDataset(Dataset):
 
     def __getitem__(self, idx):
         pid = self.pids[idx]
-        anchor = random.choice(self.pid_to_pos_enc[pid])  # NOTE: achor and postive may be the same code, see SimCSE paper
-        positive = random.choice(self.pid_to_pos_enc[pid])
-        negative = random.choice(self.pid_to_neg_enc[pid])
-        return anchor, positive, negative
+        # NOTE: achor and postive may be the same code, see SimCSE paper
+        a = random.choice(self.pid_to_pos_enc[pid])
+        p = random.choice(self.pid_to_pos_enc[pid])
+        ns = random.sample(self.pid_to_neg_enc[pid], k=self.num_negatives)
+        return a, p, ns
 
     def __len__(self):
         return len(self.pids)
@@ -276,6 +279,7 @@ class CodeNetRandomTripletDataset(Dataset):
         tokenizer_name: str,
         tokenizer_max_length: int = 256,
         num_passes: int = 200,
+        num_negatives: int = 1,
     ):
         pid_to_pos = {}
         pid_to_neg = {}
@@ -288,7 +292,7 @@ class CodeNetRandomTripletDataset(Dataset):
             pid_to_pos[pid] = positives
             pid_to_neg[pid] = negatives
 
-        return cls(pid_to_pos, pid_to_neg, tokenizer_name, tokenizer_max_length, num_passes)
+        return cls(pid_to_pos, pid_to_neg, tokenizer_name, tokenizer_max_length, num_passes, num_negatives)
 
 
 def Create_CodeNet_paired_dataset(
@@ -317,6 +321,7 @@ def Create_CodeNet_triplet_dataset(
     tokenizer_max_length=256,
     data_path=DATASET_URL,
     num_passes=200,
+    num_negatives=1,
 ):
     print("Creating CodeNet dataset. Data type: triplet")
     train_df, valid_df, test_df = load_dataset(url=data_path)
@@ -326,7 +331,7 @@ def Create_CodeNet_triplet_dataset(
         "tokenizer_max_length": tokenizer_max_length,
     }
     
-    train_ds = CodeNetRandomTripletDataset.from_pandas_df(train_df, num_passes=num_passes, **_kwargs)
+    train_ds = CodeNetRandomTripletDataset.from_pandas_df(train_df, num_passes=num_passes, num_negatives=num_negatives, **_kwargs)
     valid_ds = CodeNetTripletDataset.from_pandas_df(valid_df, **_kwargs)
     test_ds  = CodeNetTripletDataset.from_pandas_df(test_df , **_kwargs)
     return train_ds, valid_ds, test_ds

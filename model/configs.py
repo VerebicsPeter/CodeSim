@@ -4,6 +4,7 @@ from transformers import (
 )
 from dataclasses import dataclass, asdict
 
+# TODO: add pooling strat to config
 
 FINETUNING_STRATEGIES = {"binary_cls_simpl", "binary_cls_sbert"}
 
@@ -51,8 +52,8 @@ class TripletCodeSimClassifierConfig(BaseConfig):
     # Loss function hyperparameters
     margin: float = 1.0
     use_info_nce_inspired_loss: bool = False
-    temp: float = 0.05       # InfoNCE-inspired loss temperature
-    amp_factor: float = 1.0  # InfoNCE-inspired loss amplification factor
+    temp: float = 0.05      # InfoNCE-inspired loss temperature
+    num_negatives: int = 1  # InfoNCE-inspired loss hard negatives
 
 
 @dataclass
