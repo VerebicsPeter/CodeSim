@@ -423,7 +423,12 @@ def compute_loss_tuplet(trainer: CodeSimilarityTrainer, batched_data, temp=0.05)
     enc_a, enc_p, encs_n = batched_data
     N = enc_a["input_ids"].shape[0]  # batch size
     
-    inputs = {key: torch.cat([enc_a[key], enc_p[key], *(enc_n[key] for enc_n in encs_n)]) for key in enc_a}
+    if isinstance(encs_n, (list, tuple)):
+        inputs = {key: torch.cat([enc_a[key], enc_p[key],
+                                  *(enc_n[key] for enc_n in encs_n)])   for key in enc_a}
+    else:
+        inputs = {key: torch.cat([enc_a[key], enc_p[key], encs_n[key]]) for key in enc_a}
+        
     put_batch_encoding_to_device(inputs, trainer.device)
     
     embs = trainer.model(inputs)
