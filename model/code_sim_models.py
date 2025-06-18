@@ -81,7 +81,7 @@ class Trainer(Protocol):
     def train(self, epochs: int, **kwargs) -> Tuple: ...
 
 
-class CodeSimLinearCLS(nn.Module):
+class CodeSimLinearClassifierCross(nn.Module):
     def __init__(
         self,
         bert: transformers.BertModel,  # BERT based model instance
@@ -105,29 +105,7 @@ class CodeSimLinearCLS(nn.Module):
         return logits
 
 
-class CodeSimSBertTripletENC(nn.Module):
-    def __init__(
-        self,
-        bert: transformers.BertModel,  # BERT based model instance
-        freeze_bert=False,
-        dropout_rate=0.2,
-        pooling_strat: PoolingStrategy = cls_pooling_strat
-    ):
-        super().__init__()
-        if freeze_bert: freeze_model(bert)
-        self.bert = bert
-        self.bert_tokenizer = None
-        self.pooling_strat = pooling_strat
-        self.drop = nn.Dropout(dropout_rate)
-
-    def forward(self, inputs: BatchEncoding) -> torch.Tensor:
-        mask = inputs['attention_mask'].unsqueeze(-1)  # Unsqueeze for broadcasting
-        output: BaseModelOutputWithPooling = self.bert(**inputs)
-        pooled_output = self.drop(self.pooling_strat(output, mask))
-        return pooled_output
-
-
-class CodeSimSBertLinearCLS(nn.Module):
+class CodeSimLinearClassifierSBert(nn.Module):
     def __init__(
         self, 
         bert: transformers.BertModel,
@@ -160,73 +138,26 @@ class CodeSimSBertLinearCLS(nn.Module):
         return logits
 
 
-class CodeSimCombinedModel(nn.Module):
+class CodeSimContrastiveEncoder(nn.Module):
     def __init__(
         self,
         bert: transformers.BertModel,  # BERT based model instance
         freeze_bert=False,
-        pooling_strat: PoolingStrategy = cls_pooling_strat,
-        emb_head_hidden_sizes = (512, 256),
-        emb_head_output_size = 256,
-        cls_head_hidden_sizes = (512, 256),
-        cls_head_num_classes = 2,
         dropout_rate=0.2,
+        pooling_strat: PoolingStrategy = cls_pooling_strat
     ):
         super().__init__()
-        
         if freeze_bert: freeze_model(bert)
         self.bert = bert
         self.bert_tokenizer = None
         self.pooling_strat = pooling_strat
-        
-        # Nonlinearity
-        self.relu = nn.ReLU()
         self.drop = nn.Dropout(dropout_rate)
-
-        encoder_dim = bert.config.hidden_size
-        # Projection head for contrastive learning task (for meaningfull embeddings)
-        self.emb_head = self._create_mlp(  encoder_dim, *emb_head_hidden_sizes, emb_head_output_size)
-        # Classification head for multiclass tasks
-        # NOTE: input size is 3*encoder_dim, see SBERT classification method for explanation
-        self.cls_head = self._create_mlp(3*encoder_dim, *cls_head_hidden_sizes, cls_head_num_classes)
-
-    def _create_mlp(self, in_feats, hidden_size_1, hidden_size_2, out_feats):
-        return nn.Sequential(
-            nn.Linear(in_feats,
-                      hidden_size_1),
-            self.relu,
-            self.drop,
-            nn.Linear(hidden_size_1,
-                      hidden_size_2),
-            self.relu,
-            self.drop,
-            nn.Linear(hidden_size_2,
-                      out_feats),
-        )
 
     def forward(self, inputs: BatchEncoding) -> torch.Tensor:
         mask = inputs['attention_mask'].unsqueeze(-1)  # Unsqueeze for broadcasting
-        # Pass through BERT
-        output = self.bert(**inputs)
-        # Pool the BERT output
-        output = self.drop(self.pooling_strat(output, mask))
-        return output
-
-    def forward_train(self, inputs: BatchEncoding, use_proj=True):
-        """NOTE: Expects stacked a,p,n inputs."""
-        # Pass through embedding projection head layers if needed.
-        # This is the default behavior, used for training, because
-        # loss is calculated on the projection head's dimension.
-        pooled_output = self.forward(inputs)
-        emb_head_output = self.emb_head(pooled_output) if use_proj else pooled_output
-        # Split embeddings into anchor, positive and negative
-        pooled_a, pooled_p, pooled_n = pooled_output.split(pooled_output.shape[0]//3)
-        # Input feature vectors for classifier head
-        h_pos = torch.cat([pooled_a, pooled_p, torch.abs(pooled_a - pooled_p)], dim=1)
-        h_neg = torch.cat([pooled_a, pooled_n, torch.abs(pooled_a - pooled_n)], dim=1)
-        # Logits
-        cls_head_output = self.cls_head(torch.cat([h_pos, h_neg], dim=0))
-        return emb_head_output, cls_head_output
+        output: BaseModelOutputWithPooling = self.bert(**inputs)
+        pooled_output = self.drop(self.pooling_strat(output, mask))
+        return pooled_output
 
 
 # TODO: Also save the latest model.
@@ -314,6 +245,7 @@ class CodeSimilarityTrainer(Trainer):
     def train(self, epochs: int, iters_to_accumulate: int = 2):
         # Path to save the best model to
         BEST_MODEL_PATH = "best_model.pt"
+        LAST_MODEL_PATH = "last_model.pt"
         
         best_loss = np.Inf
         train_losses, valid_losses = [],[]
@@ -335,22 +267,12 @@ class CodeSimilarityTrainer(Trainer):
             train_losses.append(train_loss)
             valid_losses.append(valid_loss)
         
+        torch.save(self.model.state_dict(), LAST_MODEL_PATH)
+        
         return train_losses, valid_losses
 
 
-def Create_CombinedLoss(w_emb=1.0, w_cls=1.0, margin=1.0, distance_function=None):
-    # Use cosine distance as a distance function
-    if distance_function is None: distance_function = lambda x, y: 1 - F.cosine_similarity(x, y)
-    
-    emb_loss = nn.TripletMarginWithDistanceLoss(distance_function=distance_function, margin=margin)
-    cls_loss = nn.CrossEntropyLoss()
-    
-    def combined_loss(emb_a, emb_p, emb_n, logits, labels):
-        return w_emb * emb_loss(emb_a, emb_p, emb_n) + w_cls * cls_loss(logits, labels)
-    return combined_loss
-
-
-def compute_loss_logit(trainer: CodeSimilarityTrainer, batched_data):
+def compute_loss_logit_Cross(trainer: CodeSimilarityTrainer, batched_data):
     """Loss strategy for fine tuning BERT."""
     encoding, labels = batched_data
     # Converting to cuda tensors if needed
@@ -382,13 +304,12 @@ def compute_loss_logit_SBert(trainer: CodeSimilarityTrainer, batched_data):
 def compute_loss_triplet(trainer: CodeSimilarityTrainer, batched_data):
     """Loss strategy for finetuning BERT."""
     encs_a, encs_p, encs_n = batched_data
-    encs_n = encs_n[0]  # only use the first negatives
-    batch_size = encs_a["input_ids"].shape[0]
-    # Converting to cuda tensors if needed
+    N = encs_a["input_ids"].shape[0]  # batch size
     inputs = { key: torch.cat([encs_a[key], encs_p[key], encs_n[key]]) for key in encs_a }
+    # Converting to cuda tensors if needed
     put_batch_encoding_to_device(inputs, trainer.device)
     embs = trainer.model(inputs)
-    embs_a, embs_p, embs_n = embs.split(batch_size)
+    embs_a, embs_p, embs_n = embs.split(N)
     return trainer.loss_func(embs_a, embs_p, embs_n)
 
 
@@ -410,25 +331,13 @@ def compute_loss_tuplet(trainer: CodeSimilarityTrainer, batched_data, temp=0.05)
     This **requires** the batched tuplets to be from **different problems**.  
     If the some tuplets are from the same problem then labels are incorrect.
     """
-    
-    """
-    NOTE: Multiple hard negatives are supported now. eg.:
-        p_1 p_2 p_3 n_11 n_12 n_13 n_22 n_23 n_23 n_31 n_32 n_33
-    a_1  ^   .   .   .    .    .    .    .    .    .    .    .
-    a_2  .   ^   .   .    .    .    .    .    .    .    .    .
-    a_3  .   .   ^   .    .    .    .    .    .    .    .    .
-    """
-    # TODO: Make temp a learnable parameter
+    # NOTE: Multiple hard negatives are supported now.
+    # TODO: Make temp a learnable parameter!
     
     enc_a, enc_p, encs_n = batched_data
     N = enc_a["input_ids"].shape[0]  # batch size
+    inputs = { key: torch.cat([enc_a[key], enc_p[key], encs_n[key]]) for key in enc_a }
     
-    if isinstance(encs_n, (list, tuple)):
-        inputs = {key: torch.cat([enc_a[key], enc_p[key],
-                                  *(enc_n[key] for enc_n in encs_n)])   for key in enc_a}
-    else:
-        inputs = {key: torch.cat([enc_a[key], enc_p[key], encs_n[key]]) for key in enc_a}
-        
     put_batch_encoding_to_device(inputs, trainer.device)
     
     embs = trainer.model(inputs)
@@ -443,18 +352,4 @@ def compute_loss_tuplet(trainer: CodeSimilarityTrainer, batched_data, temp=0.05)
     
     return F.cross_entropy(logits, labels)
 
-
-def compute_loss_combined(trainer: CodeSimilarityTrainer, batched_data):
-    """Loss strategy for finetuning BERT."""
-    encs_a, encs_p, encs_n = batched_data
-    encs_n = encs_n[0]  # only use the first negatives
-    batch_size = encs_a["input_ids"].shape[0]
-    # create labels for binary classification
-    labels_p = torch.full((batch_size,),1)
-    labels_n = torch.full((batch_size,),0)
-    labels = torch.cat([labels_p,labels_n], dim=0)
-    inputs = { key: torch.cat([encs_a[key], encs_p[key], encs_n[key]]) for key in encs_a.keys() }
-    put_batch_encoding_to_device(inputs, trainer.device)
-    embs, logits = trainer.model.forward_train(inputs)
-    embs_a, embs_p, embs_n = embs.split(batch_size)
-    return trainer.loss_func(embs_a, embs_p, embs_n, logits, labels.to(trainer.device))
+# TODO: Combined loss function for contrastive and classification objectives

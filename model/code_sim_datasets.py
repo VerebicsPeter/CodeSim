@@ -1,33 +1,41 @@
 # Dataset wrappers for CodeNet data
+import os
 import gdown
 import pandas as pd
 import pprint as pp
 import random
-#import datasets
+import datasets
 import transformers
+from transformers import default_data_collator
 import torch
-from torch.utils.data import Dataset, DataLoader, Subset
+from torch.utils.data import Dataset, DataLoader, Sampler, Subset
 from collections import defaultdict
-
-
-DATASET_TYPE = {
-    "paired",
-    "triplet",
-}
 
 # TODO: Maybe load URLS from a .env or something
 # TODO: Create proper dataset with train, validation, evalualion splits for clean evaluation,
 # idea: pick a set of 'evaluation' problems distinct from training and validation problems
 COLUMNS = ["problem_id", "submission_id", "status", "code"]
-NEW_DATASET_URL_SMALL = "https://drive.google.com/uc?export=download&id=1hZ4_QjTcmesQYsPo75G1lyIe__HFfwbG"
-NEW_DATASET_URL_LARGE = "https://drive.google.com/uc?export=download&id=10ok2e2BmWRVhn_V6tRBZzLfeYQ0eaJA2"
-DATASET_URL = NEW_DATASET_URL_LARGE
+DATASET_URL_SMALL = "https://drive.google.com/uc?export=download&id=1hZ4_QjTcmesQYsPo75G1lyIe__HFfwbG"
+DATASET_URL_LARGE = "https://drive.google.com/uc?export=download&id=10ok2e2BmWRVhn_V6tRBZzLfeYQ0eaJA2"
+DATASET_URL = DATASET_URL_LARGE
 
 # NOTE: Therse are old datasets
-DATASET_URLS = {
+OLD_DATASET_URLS = {
     "paired" : "https://drive.google.com/uc?export=download&id=1pUErbyZw1fBC5gIe6KT7BWga7h6Bfr4l",
     "triplet": "https://drive.google.com/uc?export=download&id=11aBIxIMEMKoGyJ9IdUHY2XQv1ZzfyXd2",
 }
+
+
+def custom_collate_triplet(batch):
+    A, P, NS = [], [], []
+    for a,p,ns in batch:
+        A.append(a)
+        P.append(p)
+        NS.extend(ns)
+    encsA = default_data_collator(A)
+    encsP = default_data_collator(P)
+    encsNS = default_data_collator(NS) 
+    return encsA, encsP, encsNS
 
 
 def get_tokenizer_params(max_length: int):
@@ -68,12 +76,18 @@ def split_df(df: pd.DataFrame, train_ratio=0.8, valid_ratio=0.1, test_ratio=0.1,
 
 
 def load_dataset(url=DATASET_URL, columns=COLUMNS):
-    output = "dataset.csv"
-    gdown.download(url=url, output=output, quiet=False)
+    path = "dataset.csv"
+    
+    if not os.path.isfile(path=path):
+        output = path
+        gdown.download(url=url, output=output, quiet=False)
+    
     df = pd.read_csv("dataset.csv", header=0, names=columns)
     print('\n', df.describe(), '\n')
     print("Splitting dataset...")
+    
     train_df, valid_df, test_df = split_df(df)
+    
     print(f"Train size: {len(train_df)}, Valid size: {len(valid_df)}, Test size: {len(test_df)}")
     return train_df, valid_df, test_df
 
@@ -83,11 +97,10 @@ def get_loaders(train_data, valid_data, test_data, bs, shuffle, num_workers=4, n
         print(f"Limiting dataset to {num_rows} rows.")
         train_data = Subset(train_data, range(num_rows))
         valid_data = Subset(valid_data, range(num_rows))
-        test_data  = Subset(test_data, range(num_rows))
-    
+        test_data  = Subset(test_data , range(num_rows))
     train_loader = DataLoader(train_data, batch_size=bs, shuffle=shuffle, num_workers=num_workers)
     valid_loader = DataLoader(valid_data, batch_size=bs, shuffle=False, num_workers=num_workers)
-    test_loader  = DataLoader( test_data, batch_size=bs, shuffle=False, num_workers=num_workers)
+    test_loader  = DataLoader(test_data , batch_size=bs, shuffle=False, num_workers=num_workers)
     return train_loader, valid_loader, test_loader
 
 
@@ -169,63 +182,6 @@ class CodeNetPairDataset(Dataset):
         return cls(pids, pairs, labels, tokenizer_name, tokenizer_max_length, return_single_encoding)
 
 
-class CodeNetTripletDataset(Dataset):
-    """Dataset for BERT encodings from CodeNet code triplets."""
-
-    def __init__(
-        self,
-        pids, triplets,
-        tokenizer_name: str,
-        tokenizer_max_length: int = 256,
-    ):
-        super().__init__()
-        
-        assert len(pids) == len(triplets), "Length MUST match!"
-        self.pids = pids
-        self.triplets = triplets
-        
-        self.tokenizer = transformers.AutoTokenizer.from_pretrained(tokenizer_name)
-        self.tokenizer_params = get_tokenizer_params(tokenizer_max_length)
-        self.encoded_triplets = [self._encode_triplet(triplet) for triplet in triplets]
-
-    def _encode_triplet(self, triplet):
-        anchor, positive, negative = triplet
-        encodings = encode_tuple((anchor, positive, negative), self.tokenizer, self.tokenizer_params)
-        return encodings
-
-    def __getitem__(self, idx):
-        # Return the tokenized encodings
-        encodings = self.encoded_triplets[idx]
-        return encodings
-
-    def __len__(self):
-        return len(self.triplets)
-
-    @classmethod
-    def from_pandas_df(
-        cls,
-        df: pd.DataFrame,
-        tokenizer_name: str,
-        tokenizer_max_length: int = 256,
-    ):
-        pids, triplets = [], []
-        
-        for pid, group_df in df.groupby("problem_id"):
-            df_pos = group_df[group_df["status"] == "Accepted"]
-            df_neg = group_df[group_df["status"] != "Accepted"]
-            positives = df_pos["code"].to_list()
-            pos1 = positives[:len(positives)//2 ]
-            pos2 = positives[ len(positives)//2:]
-            negatives = df_neg["code"].to_list()
-            n = min(len(pos1), len(pos2), len(negatives))
-            if n == 0: continue
-            #print("sampled:", n, "triplets for problem ID:", pid)
-            pids.extend([pid] * n)
-            triplets.extend(zip(pos1[:n], pos2[:n], negatives[:n]))
-
-        return cls(pids, triplets, tokenizer_name, tokenizer_max_length)
-
-
 class CodeNetRandomTripletDataset(Dataset):
     """Dataset for BERT encodings from CodeNet code triplets."""
 
@@ -236,15 +192,16 @@ class CodeNetRandomTripletDataset(Dataset):
         pid_to_neg,
         tokenizer_name: str,
         tokenizer_max_length: int = 256,
-        num_passes: int = 200,
         num_negatives: int = 1, # number of same problem (hard) negatives
+        deterministic: bool = False,
     ):
         super().__init__()
-        all_pids = set(pid_to_pos.keys()) | set(pid_to_neg.keys())
-        self.pids = list(all_pids) * num_passes
+        all_pids = set(pid_to_pos.keys()) & set(pid_to_neg.keys())
+        self.pids = list(all_pids)
         self.pid_to_pos = pid_to_pos
         self.pid_to_neg = pid_to_neg
         self.num_negatives = num_negatives
+        self.deterministic = deterministic
         
         self.tokenizer = transformers.AutoTokenizer.from_pretrained(tokenizer_name)
         self.tokenizer_params = get_tokenizer_params(tokenizer_max_length)
@@ -261,12 +218,12 @@ class CodeNetRandomTripletDataset(Dataset):
             for pid, pos_codes in pid_to_neg.items()
         }
 
-    def __getitem__(self, idx):
-        pid = self.pids[idx]
-        # NOTE: achor and postive may be the same code, see SimCSE paper
-        a = random.choice(self.pid_to_pos_enc[pid])
-        p = random.choice(self.pid_to_pos_enc[pid])
-        ns = random.sample(self.pid_to_neg_enc[pid], k=self.num_negatives)
+    def __getitem__(self, pid: str):
+        rng = random.Random(x=42) if self.deterministic else random
+        # NOTE: anchor and postive may be the same code, see SimCSE paper
+        a = rng.choice(self.pid_to_pos_enc[pid])
+        p = rng.choice(self.pid_to_pos_enc[pid])
+        ns = rng.sample(self.pid_to_neg_enc[pid], k=self.num_negatives)
         return a, p, ns
 
     def __len__(self):
@@ -278,8 +235,8 @@ class CodeNetRandomTripletDataset(Dataset):
         df: pd.DataFrame,
         tokenizer_name: str,
         tokenizer_max_length: int = 256,
-        num_passes: int = 200,
         num_negatives: int = 1,
+        deterministic: bool = False,
     ):
         pid_to_pos = {}
         pid_to_neg = {}
@@ -292,7 +249,32 @@ class CodeNetRandomTripletDataset(Dataset):
             pid_to_pos[pid] = positives
             pid_to_neg[pid] = negatives
 
-        return cls(pid_to_pos, pid_to_neg, tokenizer_name, tokenizer_max_length, num_passes, num_negatives)
+        return cls(pid_to_pos, pid_to_neg, tokenizer_name, tokenizer_max_length, num_negatives, deterministic)
+
+
+class CodeNetDefaultTripletSampler(Sampler):
+    def __init__(self, pids):
+        self.pids = pids
+    
+    def __iter__(self):
+        return iter(self.pids)
+    
+    def __len__(self):
+        return len(self.pids)
+
+
+class CodeNetRandomTripletBatchSampler(Sampler):
+    def __init__(self, pids, num_batches, num_pids_per_batch):
+        self.pids = pids
+        self.num_batches = num_batches
+        self.num_pids_per_batch = num_pids_per_batch
+
+    def __iter__(self):
+        for _ in range(self.num_batches):
+            yield random.sample(self.pids, self.num_pids_per_batch)
+
+    def __len__(self):
+        return self.num_batches
 
 
 def Create_CodeNet_paired_dataset(
@@ -312,7 +294,7 @@ def Create_CodeNet_paired_dataset(
     
     train_ds = CodeNetPairDataset.from_pandas_df(train_df, **_kwargs)
     valid_ds = CodeNetPairDataset.from_pandas_df(valid_df, **_kwargs)
-    test_ds = CodeNetPairDataset.from_pandas_df(test_df, **_kwargs)
+    test_ds  = CodeNetPairDataset.from_pandas_df(test_df, **_kwargs)
     return train_ds, valid_ds, test_ds
 
 
@@ -320,7 +302,6 @@ def Create_CodeNet_triplet_dataset(
     tokenizer_name,
     tokenizer_max_length=256,
     data_path=DATASET_URL,
-    num_passes=200,
     num_negatives=1,
 ):
     print("Creating CodeNet dataset. Data type: triplet")
@@ -331,13 +312,13 @@ def Create_CodeNet_triplet_dataset(
         "tokenizer_max_length": tokenizer_max_length,
     }
     
-    train_ds = CodeNetRandomTripletDataset.from_pandas_df(train_df, num_passes=num_passes, num_negatives=num_negatives, **_kwargs)
-    valid_ds = CodeNetTripletDataset.from_pandas_df(valid_df, **_kwargs)
-    test_ds  = CodeNetTripletDataset.from_pandas_df(test_df , **_kwargs)
+    train_ds = CodeNetRandomTripletDataset.from_pandas_df(train_df, num_negatives=num_negatives, **_kwargs)
+    valid_ds = CodeNetRandomTripletDataset.from_pandas_df(valid_df, deterministic=True, num_negatives=1, **_kwargs)
+    test_ds  = CodeNetRandomTripletDataset.from_pandas_df(test_df , deterministic=True, num_negatives=1, **_kwargs)
     return train_ds, valid_ds, test_ds
 
 
-class POJDataset(Dataset):
+class POJ104Dataset(Dataset):
     """Simple wrapper for the dataset 'semeru/Code-Code-CloneDetection-POJ104'"""
     
     def __init__(self, poj_dataset, tokenizer_name: str):
@@ -368,7 +349,6 @@ class POJ104TripletDataset(Dataset):
         self.tokenizer = transformers.AutoTokenizer.from_pretrained(tokenizer_name)
         self.tokenizer_params = get_tokenizer_params(self.tokenizer.model_max_length)
 
-    # TODO: maybe seed this explicitly...
     def __getitem__(self, idx):
         anchor = self.dataset[idx]
 
@@ -398,6 +378,12 @@ def Create_POJ104_triplet_dataset(tokenizer_name: str):
     poj_dataset = datasets.load_dataset("semeru/Code-Code-CloneDetection-POJ104")
     train_dataset = POJ104TripletDataset(poj_dataset["train"], tokenizer_name)
     valid_dataset = POJ104TripletDataset(poj_dataset["validation"], tokenizer_name)
-    test_dataset_map = POJDataset(poj_dataset["test"], tokenizer_name)
+    test_dataset_map = POJ104Dataset(poj_dataset["test"], tokenizer_name)
     test_dataset_cls = POJ104TripletDataset(poj_dataset["test"], tokenizer_name)
     return train_dataset, valid_dataset, test_dataset_map, test_dataset_cls
+
+# TODO/FIXME: 2 problems with triplet datasets:
+# 1. validation loss was calculated on more than 1 triplet per problem
+#    -> inaccurate validation loss values
+# 2. if the random triplet dataset is shuffled, the triplets are not from unique problems 
+#    -> inaccurate training loss values
