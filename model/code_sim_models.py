@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 # Hugging Face Transformers (CodeBERT etc.)
 import transformers
 from transformers import AutoTokenizer, BatchEncoding
-from transformers.modeling_outputs import BaseModelOutputWithPooling
+from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling
 
 # Libraries for logging
 from tqdm.auto import tqdm
@@ -24,7 +24,7 @@ from typing import Callable, Protocol, Tuple
 # - a max pooled version of the last hidden states
 # - an attention pooled version of the last hidden states
 # TODO: RNN (GRU) based pooling strategy
-PoolingStrategy = Callable[[BaseModelOutputWithPooling, torch.Tensor], torch.Tensor]
+PoolingStrategy = Callable[[BaseModelOutputWithPooling | torch.Tensor, torch.Tensor], torch.Tensor]
 
 
 def cls_pooling_strat(output: BaseModelOutputWithPooling, *_):
@@ -32,13 +32,22 @@ def cls_pooling_strat(output: BaseModelOutputWithPooling, *_):
 
 
 def max_pooling_strat(output: BaseModelOutputWithPooling, mask: torch.Tensor):
-    pooled_output = output.last_hidden_state * mask  # mask out irrelevant embeddings
+    pooled_output = output.last_hidden_state * mask.unsqueeze(-1)  # mask out irrelevant embeddings
     return pooled_output.max(dim=1).values
 
 
 def mean_pooling_strat(output: BaseModelOutputWithPooling, mask: torch.Tensor):
-    pooled_output = output.last_hidden_state * mask  # mask out irrelevant embeddings
+    pooled_output = output.last_hidden_state * mask.unsqueeze(-1)  # mask out irrelevant embeddings
     return pooled_output.mean(dim=1)
+
+
+def qwen3_pooling_strat(output: BaseModelOutput, mask: torch.Tensor):
+    left_padding = (mask[:, -1].sum() == mask.shape[0])
+    if left_padding:
+        return output.last_hidden_state[:, -1]
+    else:
+        sequence_lengths = mask.sum(dim=1) - 1 
+        return output.last_hidden_state[:, sequence_lengths]
 
 
 class AttentionPooler(nn.Module):
@@ -53,7 +62,6 @@ class AttentionPooler(nn.Module):
         )
     
     def forward(self, output: BaseModelOutputWithPooling, mask: torch.Tensor):
-        mask = mask.squeeze(-1)  # remove unnecessary 1 dim
         # get attention scores using learnable weights
         attn_scores = self.attention(output.last_hidden_state).squeeze(-1)
         # mask attention scores with '-inf', softmax turns them to 0...
@@ -98,7 +106,7 @@ class CodeSimLinearClassifierCross(nn.Module):
         self.cls = nn.Linear(self.bert.config.hidden_size, 1)
 
     def forward(self, inputs: BatchEncoding) -> torch.Tensor:
-        mask = inputs['attention_mask'].unsqueeze(-1)  # Unsqueeze for broadcasting
+        mask = inputs['attention_mask']
         output: BaseModelOutputWithPooling = self.bert(**inputs)
         pooled_output = self.pooling_strat(output, mask)
         logits = self.cls(self.drop(pooled_output))
@@ -123,8 +131,8 @@ class CodeSimLinearClassifierSBert(nn.Module):
         self.cls = nn.Linear(3 * bert.config.hidden_size, 1)
     
     def forward(self, enc_u: BatchEncoding, enc_v: BatchEncoding) -> torch.Tensor:
-        mask_u = enc_u['attention_mask'].unsqueeze(-1)  # Unsqueeze for broadcasting
-        mask_v = enc_v['attention_mask'].unsqueeze(-1)  # Unsqueeze for broadcasting
+        mask_u = enc_u['attention_mask']
+        mask_v = enc_v['attention_mask']
         # Pass through BERT
         u = self.bert(**enc_u)
         v = self.bert(**enc_v)
@@ -141,26 +149,25 @@ class CodeSimLinearClassifierSBert(nn.Module):
 class CodeSimContrastiveEncoder(nn.Module):
     def __init__(
         self,
-        bert: transformers.BertModel,  # BERT based model instance
-        freeze_bert=False,
+        enc_model: transformers.PreTrainedModel,
+        freeze_enc_model=False,
         dropout_rate=0.2,
         pooling_strat: PoolingStrategy = cls_pooling_strat
     ):
         super().__init__()
-        if freeze_bert: freeze_model(bert)
-        self.bert = bert
-        self.bert_tokenizer = None
+        if freeze_enc_model: freeze_model(enc_model)
+        self.enc_model = enc_model
+        self.enc_tokenizer = None
         self.pooling_strat = pooling_strat
         self.drop = nn.Dropout(dropout_rate)
 
     def forward(self, inputs: BatchEncoding) -> torch.Tensor:
-        mask = inputs['attention_mask'].unsqueeze(-1)  # Unsqueeze for broadcasting
-        output: BaseModelOutputWithPooling = self.bert(**inputs)
+        mask = inputs['attention_mask']
+        output: BaseModelOutputWithPooling = self.enc_model(**inputs)
         pooled_output = self.drop(self.pooling_strat(output, mask))
         return pooled_output
 
 
-# TODO: Also save the latest model.
 class CodeSimilarityTrainer(Trainer):
     def __init__(
         self,

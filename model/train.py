@@ -85,7 +85,7 @@ def finetune_model(config: configs.CodeSimClassifierConfig):
     tokenizer_max_length = 512 if return_single_encoding else 256
     
     train_data, valid_data, test_data = code_sim_datasets.Create_CodeNet_paired_dataset(
-        tokenizer_name=config.pretrained_bert_name,
+        tokenizer_name=config.pretrained_model_name,
         tokenizer_max_length=tokenizer_max_length,
         return_single_encoding=return_single_encoding,
     )
@@ -99,8 +99,9 @@ def finetune_model(config: configs.CodeSimClassifierConfig):
 
     # Model Creation
     model = model_cls(
-        config.pretrained_bert,
-        freeze_bert=config.freeze_bert,
+        config.pretrained_model,
+        freeze_bert=config.freeze_model,
+        pooling_strat=config.pooling_strat,
         dropout_rate=config.dropout_rate,
     )
     model.to(DEVICE)
@@ -137,7 +138,7 @@ def finetune_model_contrastive(config: configs.CodeSimContrastiveClassifierConfi
     # Dataset Creation
     if use_poj:
         poj_dataset = code_sim_datasets.Create_POJ104_triplet_dataset(
-            tokenizer_name=config.pretrained_bert_name,
+            tokenizer_name=config.pretrained_model_name,
         )
         train_dataset, valid_dataset, test_dataset_map, test_dataset_cls = poj_dataset
         train_loader = DataLoader(train_dataset, batch_size=config.bs, shuffle=True)
@@ -146,7 +147,7 @@ def finetune_model_contrastive(config: configs.CodeSimContrastiveClassifierConfi
         test_loader_cls = DataLoader(test_dataset_cls, batch_size=config.bs, shuffle=False)
     else:
         train_data, valid_data, test_data = code_sim_datasets.Create_CodeNet_triplet_dataset(
-            tokenizer_name=config.pretrained_bert_name,
+            tokenizer_name=config.pretrained_model_name,
             tokenizer_max_length=256,
             num_negatives=config.num_negatives
         )
@@ -167,16 +168,13 @@ def finetune_model_contrastive(config: configs.CodeSimContrastiveClassifierConfi
             collate_fn=code_sim_datasets.custom_collate_triplet
         )
         
-        test_loader = DataLoader(
-            test_data, batch_size=config.bs,
-            sampler=code_sim_datasets.CodeNetDefaultTripletSampler(test_data.pids),
-            collate_fn=code_sim_datasets.custom_collate_triplet
-        )
+        test_loader = DataLoader(test_data, batch_size=config.bs)
 
     # Model Creation
     model = CodeSimContrastiveEncoder(
-        config.pretrained_bert,
-        freeze_bert=config.freeze_bert,
+        config.pretrained_model,
+        freeze_enc_model=config.freeze_model,
+        pooling_strat=config.pooling_strat,
         dropout_rate=config.dropout_rate,
     )
     model.to(DEVICE)
@@ -217,24 +215,24 @@ def eval(model, num_rows=5000):
             tokenizer_max_length=512,
             return_single_encoding=True,
         )
+        eval_func = eval_model_classifier
     elif isinstance(model, CodeSimLinearClassifierSBert):
         dataset = code_sim_datasets.Create_CodeNet_paired_dataset(
             tokenizer_name=model.bert.name_or_path,
             tokenizer_max_length=256,
             return_single_encoding=False,
         )
+        eval_func = eval_model_classifier
+    elif isinstance(model, CodeSimContrastiveEncoder):
+        print("Evaluating ", model.enc_model.name_or_path)
+        dataset = code_sim_datasets.Create_CodeNet_triplet_dataset(tokenizer_name=model.enc_model.name_or_path)
+        eval_func = eval_model_contrastive_cls
     else:
         raise ValueError(f"Invalid model type. {model.__class__.__name__}")
 
-    # NOTE/TODO:
-    _, _, test_loader = code_sim_datasets.get_loaders(
-        *dataset,
-        bs=20,
-        shuffle=False,
-        num_rows=num_rows,
-    )
+    _, _, test_loader = code_sim_datasets.get_loaders(*dataset, bs=20, shuffle=False, num_rows=num_rows)
     
-    y_true, y_pred = eval_model_classifier(eval_data=test_loader, model=model)
+    y_true, y_pred = eval_func(eval_data=test_loader, model=model)
     print_reports(y_true, y_pred)
     return y_true, y_pred
 
@@ -269,7 +267,7 @@ def eval_model_contrastive_cls(eval_data: DataLoader, model: CodeSimContrastiveE
         encs_a, encs_p, encs_n = data
         batch_size = encs_a["input_ids"].shape[0]
         inputs = {key: torch.cat([encs_a[key], encs_p[key], encs_n[key]]) for key in encs_a}
-        code_sim_models.put_batch_encoding_to_device(inputs, model.bert.device)
+        code_sim_models.put_batch_encoding_to_device(inputs, model.enc_model.device)
         outputs = model.forward(inputs)
         embs_a, embs_p, embs_n = outputs.split(batch_size)
         # Calculate the pairwise cosine similarities
@@ -292,9 +290,9 @@ def eval_model_contrastive_map(eval_data: DataLoader, model: CodeSimContrastiveE
     all_lbls = []
     for data in tqdm(eval_data):
         encs, lbls = data
-        code_sim_models.put_batch_encoding_to_device(encs, model.bert.device)
+        code_sim_models.put_batch_encoding_to_device(encs, model.enc_model.device)
         embs = model.forward(encs)
-        lbls = lbls.to(model.bert.device)
+        lbls = lbls.to(model.enc_model.device)
         all_embs.append(embs)
         all_lbls.append(lbls)
     all_embs = torch.cat(all_embs, dim=0)

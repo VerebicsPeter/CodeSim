@@ -112,7 +112,7 @@ def encode_tuple(t: tuple[str], tokenizer, tokenizer_params):
 
 # TODO: augment pairs by flipping the order of the pair
 class CodeNetPairDataset(Dataset):
-    """Dataset for BERT encodings from CodeNet code pairs."""
+    """Dataset for BERT encodings from (fixed) CodeNet code pairs."""
 
     def __init__(
         self,
@@ -180,6 +180,63 @@ class CodeNetPairDataset(Dataset):
             labels.extend([1] * n + [0] * n)
         
         return cls(pids, pairs, labels, tokenizer_name, tokenizer_max_length, return_single_encoding)
+
+
+class CodeNetTripletDataset(Dataset):
+    """Dataset for BERT encodings from (fixed) CodeNet code triplets."""
+
+    def __init__(
+        self,
+        pids, triplets,
+        tokenizer_name: str,
+        tokenizer_max_length: int = 256,
+    ):
+        super().__init__()
+        
+        assert len(pids) == len(triplets), "Length MUST match!"
+        self.pids = pids
+        self.triplets = triplets
+        
+        self.tokenizer = transformers.AutoTokenizer.from_pretrained(tokenizer_name)
+        self.tokenizer_params = get_tokenizer_params(tokenizer_max_length)
+        self.encoded_triplets = [self._encode_triplet(triplet) for triplet in triplets]
+
+    def _encode_triplet(self, triplet):
+        anchor, positive, negative = triplet
+        encodings = encode_tuple((anchor, positive, negative), self.tokenizer, self.tokenizer_params)
+        return encodings
+
+    def __getitem__(self, idx):
+        # Return the tokenized encodings
+        encodings = self.encoded_triplets[idx]
+        return encodings
+
+    def __len__(self):
+        return len(self.triplets)
+
+    @classmethod
+    def from_pandas_df(
+        cls,
+        df: pd.DataFrame,
+        tokenizer_name: str,
+        tokenizer_max_length: int = 256,
+    ):
+        pids, triplets = [], []
+        
+        for pid, group_df in df.groupby("problem_id"):
+            df_pos = group_df[group_df["status"] == "Accepted"]
+            df_neg = group_df[group_df["status"] != "Accepted"]
+            positives = df_pos["code"].to_list()
+            pos1 = positives[:len(positives)//2 ]
+            pos2 = positives[ len(positives)//2:]
+            negatives = df_neg["code"].to_list()
+            n = min(len(pos1), len(pos2), len(negatives))
+            if n == 0: continue
+            #print("sampled:", n, "triplets for problem ID:", pid)
+            pids.extend([pid] * n)
+            triplets.extend(zip(pos1[:n], pos2[:n], negatives[:n]))
+
+        return cls(pids, triplets, tokenizer_name, tokenizer_max_length)
 
 
 class CodeNetRandomTripletDataset(Dataset):
@@ -294,7 +351,7 @@ def Create_CodeNet_paired_dataset(
     
     train_ds = CodeNetPairDataset.from_pandas_df(train_df, **_kwargs)
     valid_ds = CodeNetPairDataset.from_pandas_df(valid_df, **_kwargs)
-    test_ds  = CodeNetPairDataset.from_pandas_df(test_df, **_kwargs)
+    test_ds = CodeNetPairDataset.from_pandas_df(test_df, **_kwargs)
     return train_ds, valid_ds, test_ds
 
 
@@ -313,8 +370,8 @@ def Create_CodeNet_triplet_dataset(
     }
     
     train_ds = CodeNetRandomTripletDataset.from_pandas_df(train_df, num_negatives=num_negatives, **_kwargs)
-    valid_ds = CodeNetRandomTripletDataset.from_pandas_df(valid_df, deterministic=True, num_negatives=1, **_kwargs)
-    test_ds  = CodeNetRandomTripletDataset.from_pandas_df(test_df , deterministic=True, num_negatives=1, **_kwargs)
+    valid_ds = CodeNetRandomTripletDataset.from_pandas_df(valid_df, num_negatives=num_negatives, deterministic=True, **_kwargs)
+    test_ds = CodeNetTripletDataset.from_pandas_df(test_df , **_kwargs)
     return train_ds, valid_ds, test_ds
 
 
@@ -382,8 +439,3 @@ def Create_POJ104_triplet_dataset(tokenizer_name: str):
     test_dataset_cls = POJ104TripletDataset(poj_dataset["test"], tokenizer_name)
     return train_dataset, valid_dataset, test_dataset_map, test_dataset_cls
 
-# TODO/FIXME: 2 problems with triplet datasets:
-# 1. validation loss was calculated on more than 1 triplet per problem
-#    -> inaccurate validation loss values
-# 2. if the random triplet dataset is shuffled, the triplets are not from unique problems 
-#    -> inaccurate training loss values
