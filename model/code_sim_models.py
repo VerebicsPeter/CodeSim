@@ -43,11 +43,13 @@ def mean_pooling_strat(output: BaseModelOutputWithPooling, mask: torch.Tensor):
 
 def qwen3_pooling_strat(output: BaseModelOutput, mask: torch.Tensor):
     left_padding = (mask[:, -1].sum() == mask.shape[0])
+    last_hidden_state = output.last_hidden_state
     if left_padding:
-        return output.last_hidden_state[:, -1]
+        return last_hidden_state[:, -1]
     else:
-        sequence_lengths = mask.sum(dim=1) - 1 
-        return output.last_hidden_state[:, sequence_lengths]
+        sequence_lengths = mask.sum(dim=1) - 1
+        batch_size = last_hidden_state.shape[0]
+        return last_hidden_state[torch.arange(batch_size, device=last_hidden_state.device), sequence_lengths]
 
 
 class AttentionPooler(nn.Module):

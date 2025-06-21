@@ -38,6 +38,13 @@ def custom_collate_triplet(batch):
     return encsA, encsP, encsNS
 
 
+def get_tokenizer_instance(tokenizer_name: str):
+    if tokenizer_name == "Qwen/Qwen3-Embedding-0.6B":
+        return transformers.AutoTokenizer.from_pretrained(tokenizer_name, padding_side='left')
+    else:
+        return transformers.AutoTokenizer.from_pretrained(tokenizer_name)
+
+
 def get_tokenizer_params(max_length: int):
     return {
         "padding": "max_length",  # Pad to max_length
@@ -129,7 +136,7 @@ class CodeNetPairDataset(Dataset):
         self.labels = labels
         self.return_single_encoding = return_single_encoding
         
-        self.tokenizer = transformers.AutoTokenizer.from_pretrained(tokenizer_name)
+        self.tokenizer = get_tokenizer_instance(tokenizer_name)
         self.tokenizer_params = get_tokenizer_params(tokenizer_max_length)
         self.encoded_pairs = [self._encode_pair(pair) for pair in pairs]
 
@@ -197,7 +204,7 @@ class CodeNetTripletDataset(Dataset):
         self.pids = pids
         self.triplets = triplets
         
-        self.tokenizer = transformers.AutoTokenizer.from_pretrained(tokenizer_name)
+        self.tokenizer = get_tokenizer_instance(tokenizer_name)
         self.tokenizer_params = get_tokenizer_params(tokenizer_max_length)
         self.encoded_triplets = [self._encode_triplet(triplet) for triplet in triplets]
 
@@ -260,7 +267,7 @@ class CodeNetRandomTripletDataset(Dataset):
         self.num_negatives = num_negatives
         self.deterministic = deterministic
         
-        self.tokenizer = transformers.AutoTokenizer.from_pretrained(tokenizer_name)
+        self.tokenizer = get_tokenizer_instance(tokenizer_name)
         self.tokenizer_params = get_tokenizer_params(tokenizer_max_length)
         
         enc_func_1 = lambda code: self.tokenizer(code, **self.tokenizer_params)
@@ -380,7 +387,8 @@ class POJ104Dataset(Dataset):
     
     def __init__(self, poj_dataset, tokenizer_name: str):
         self.dataset = poj_dataset
-        self.tokenizer = transformers.AutoTokenizer.from_pretrained(tokenizer_name)
+        
+        self.tokenizer = get_tokenizer_instance(tokenizer_name)
         self.tokenizer_params = get_tokenizer_params(self.tokenizer.model_max_length)
 
     def __getitem__(self, idx):
@@ -403,7 +411,8 @@ class POJ104TripletDataset(Dataset):
         for idx, item in enumerate(poj_dataset):
             self.lbl_to_idx[item["label"]].append(idx)
         self.labels = list(self.lbl_to_idx.keys())
-        self.tokenizer = transformers.AutoTokenizer.from_pretrained(tokenizer_name)
+        
+        self.tokenizer = get_tokenizer_instance(tokenizer_name)
         self.tokenizer_params = get_tokenizer_params(self.tokenizer.model_max_length)
 
     def __getitem__(self, idx):
@@ -438,4 +447,3 @@ def Create_POJ104_triplet_dataset(tokenizer_name: str):
     test_dataset_map = POJ104Dataset(poj_dataset["test"], tokenizer_name)
     test_dataset_cls = POJ104TripletDataset(poj_dataset["test"], tokenizer_name)
     return train_dataset, valid_dataset, test_dataset_map, test_dataset_cls
-
