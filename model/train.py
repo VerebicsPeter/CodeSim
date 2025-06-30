@@ -127,13 +127,25 @@ def finetune_model(config: configs.CodeSimClassifierConfig):
 def finetune_model_contrastive(config: configs.CodeSimContrastiveClassifierConfig, use_poj=False):
     config.init_model()
     
-    if config.use_info_nce_inspired_loss:
-        loss_func = None  # TODO: maybe make a custom loss for the hardcoded loss in method below
-        loss_hook = lambda trainer, batched_data: code_sim_models.compute_loss_tuplet(trainer, batched_data, config.temp)
-    else:
-        distance_function = lambda x, y: 1 - F.cosine_similarity(x, y)  # cosine distance
+    distance_function = lambda x, y: 1 - F.cosine_similarity(x, y)  # cosine distance
+    
+    if config.finetuning_strategy not in configs.CONTRASTIVE_FINETUNING_STRATEGIES:
+        raise ValueError(f"Invalid finetuning strategy: {config.finetuning_strategy}.")
+    elif config.finetuning_strategy == "triplet_loss":
         loss_func = nn.TripletMarginWithDistanceLoss(distance_function=distance_function, margin=config.margin)
         loss_hook = code_sim_models.compute_loss_triplet
+    elif config.finetuning_strategy == "info_nce_loss":
+        # TODO: implement InfoNCE loss as a custom loss function
+        loss_func = None
+        loss_hook = lambda trainer, batched_data: code_sim_models.compute_loss_tuplet(
+            trainer, batched_data, config.temp
+        )
+    elif config.finetuning_strategy == "combined_loss":
+        # TODO: implement combined loss as a custom loss function
+        loss_func = nn.TripletMarginWithDistanceLoss(distance_function=distance_function, margin=config.margin)
+        loss_hook = lambda trainer, batched_data: code_sim_models.compute_loss_combined(
+            trainer, batched_data, config.temp, config.w_1, config.w_2
+        )
     
     # Dataset Creation
     if use_poj:
@@ -292,9 +304,8 @@ def eval_model_contrastive_map(eval_data: DataLoader, model: CodeSimContrastiveE
         encs, lbls = data
         code_sim_models.put_batch_encoding_to_device(encs, model.enc_model.device)
         embs = model.forward(encs)
-        lbls = lbls.to(model.enc_model.device)
-        all_embs.append(embs)
-        all_lbls.append(lbls)
+        all_embs.append(embs.detach().cpu())
+        all_lbls.append(lbls.detach().cpu())
     all_embs = torch.cat(all_embs, dim=0)
     all_lbls = torch.cat(all_lbls, dim=0)
     map_at_R = metrics.calculate_map_at_R(all_embs, all_lbls, R=499)

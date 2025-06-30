@@ -340,7 +340,6 @@ def compute_loss_tuplet(trainer: CodeSimilarityTrainer, batched_data, temp=0.05)
     This **requires** the batched tuplets to be from **different problems**.  
     If the some tuplets are from the same problem then labels are incorrect.
     """
-    # NOTE: Multiple hard negatives are supported now.
     # TODO: Make temp a learnable parameter!
     
     enc_a, enc_p, encs_n = batched_data
@@ -353,12 +352,39 @@ def compute_loss_tuplet(trainer: CodeSimilarityTrainer, batched_data, temp=0.05)
     embs = F.normalize(embs, dim=1)  # normalize to align with cosine similarity
     
     A, POS, NEG = embs.split((N, N, embs.size(0)-2*N))
-    
     Q = torch.cat([POS, NEG], dim=0)
     
     logits = A @ Q.T / temp
     labels = torch.arange(N, device=trainer.device)
     
     return F.cross_entropy(logits, labels)
+
+
+def compute_loss_combined(
+    trainer: CodeSimilarityTrainer, batched_data,
+    temp=0.05,
+    w_1=1.0,
+    w_2=1.0,
+):
+    # TODO: Make temp a learnable parameter!
+    
+    enc_a, enc_p, encs_n = batched_data
+    N = enc_a["input_ids"].shape[0]  # batch size
+    inputs = { key: torch.cat([enc_a[key], enc_p[key], encs_n[key]]) for key in enc_a }
+    
+    put_batch_encoding_to_device(inputs, trainer.device)
+    
+    embs = trainer.model(inputs)
+    embs = F.normalize(embs, dim=1)  # normalize to align with cosine similarity
+    
+    A, POS, NEG = embs.split(N)
+    Q = torch.cat([POS, NEG], dim=0)
+    
+    logits = A @ Q.T / temp
+    labels = torch.arange(N, device=trainer.device)
+    
+    loss_1 = F.cross_entropy(logits, labels)
+    loss_2 = trainer.loss_func(A, POS, NEG)  # Local loss
+    return w_1 * loss_1 + w_2 * loss_2
 
 # TODO: Combined loss function for contrastive and classification objectives
