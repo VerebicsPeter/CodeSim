@@ -68,13 +68,11 @@ def finetune_model(config: configs.CodeSimClassifierConfig):
     
     if config.finetuning_strategy not in configs.FINETUNING_STRATEGIES:
         raise ValueError(f"Invalid finetuning strategy: {config.finetuning_strategy}.")
-    
-    if config.finetuning_strategy == "binary_cls_simpl":
+    elif config.finetuning_strategy == "binary_cls_simpl":
         model_cls = code_sim_models.CodeSimLinearClassifierCross
         loss_func = nn.BCEWithLogitsLoss()
         loss_hook = code_sim_models.compute_loss_logit_Cross
-    
-    if config.finetuning_strategy == "binary_cls_sbert":
+    elif config.finetuning_strategy == "binary_cls_sbert":
         model_cls = code_sim_models.CodeSimLinearClassifierSBert
         loss_func = nn.BCEWithLogitsLoss()
         loss_hook = code_sim_models.compute_loss_logit_SBert

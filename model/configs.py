@@ -53,7 +53,7 @@ class BaseConfig:
             self.pretrained_model = get_peft_model(self.pretrained_model, self.lora_config)
         
         if torch.cuda.device_count() > 1:
-            print("Wrapping encoder model with DataParallel for parameter multiple GPU usage.")
+            print("Wrapping encoder model with DataParallel for multiple GPU usage.")
             print(f"Using {torch.cuda.device_count()} GPUs with DataParallel.")
             self.pretrained_model = nn.DataParallel(self.pretrained_model)
         

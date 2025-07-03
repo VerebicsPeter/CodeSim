@@ -17,7 +17,8 @@ from collections import defaultdict
 COLUMNS = ["problem_id", "submission_id", "status", "code"]
 DATASET_URL_SMALL = "https://drive.google.com/uc?export=download&id=1hZ4_QjTcmesQYsPo75G1lyIe__HFfwbG"
 DATASET_URL_LARGE = "https://drive.google.com/uc?export=download&id=10ok2e2BmWRVhn_V6tRBZzLfeYQ0eaJA2"
-DATASET_URL = DATASET_URL_LARGE
+DATASET_URL_118 = "https://drive.google.com/uc?export=download&id=1cV_Qv1ZSraQHo6G1HSEu82LKZxUsxTgw"
+DATASET_URL = DATASET_URL_118
 
 # NOTE: Therse are old datasets
 OLD_DATASET_URLS = {
