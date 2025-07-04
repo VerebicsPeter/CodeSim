@@ -47,7 +47,7 @@ def custom_collate_POJpair(batch):
     encsA = default_data_collator(A)
     encsP = default_data_collator(P)
     # Hacky dummy encoding for negative placeholder
-    encs_dummy = {k: torch.rand(0, v.shape[-1]) for k, v in encsA.items()}
+    encs_dummy = {k: torch.zeros(0, v.shape[-1], dtype=v.dtype) for k, v in encsA.items()}
     return encsA, encsP, encs_dummy
 
 
