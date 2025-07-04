@@ -150,11 +150,23 @@ def finetune_model_contrastive(config: configs.CodeSimContrastiveClassifierConfi
         poj_dataset = code_sim_datasets.Create_POJ104_triplet_dataset(
             tokenizer_name=config.pretrained_model_name,
         )
-        train_dataset, valid_dataset, test_dataset_map, test_dataset_cls = poj_dataset
-        train_loader = DataLoader(train_dataset, batch_size=config.bs, shuffle=True)
-        valid_loader = DataLoader(valid_dataset, batch_size=config.bs, shuffle=False)
-        test_loader_map = DataLoader(test_dataset_map, batch_size=config.bs, shuffle=False)
-        test_loader_cls = DataLoader(test_dataset_cls, batch_size=config.bs, shuffle=False)
+        train_data, valid_data, test_data_map, test_data_cls = poj_dataset
+        train_loader = DataLoader(
+            train_data,
+            batch_sampler=code_sim_datasets.CodeNetRandomTripletBatchSampler(
+                pids=train_data.labels,
+                num_batches=config.num_batches,
+                num_pids_per_batch=config.bs
+            ),
+            collate_fn=code_sim_datasets.custom_collate_triplet
+        )
+        valid_loader = DataLoader(
+            valid_data, batch_size=config.bs,
+            sampler=code_sim_datasets.CodeNetDefaultTripletSampler(valid_data.labels),
+            collate_fn=code_sim_datasets.custom_collate_triplet
+        )
+        test_loader_map = DataLoader(test_data_map, batch_size=config.bs, shuffle=False)
+        test_loader_cls = DataLoader(test_data_cls, batch_size=config.bs, shuffle=False)
     else:
         train_data, valid_data, test_data = code_sim_datasets.Create_CodeNet_triplet_dataset(
             tokenizer_name=config.pretrained_model_name,

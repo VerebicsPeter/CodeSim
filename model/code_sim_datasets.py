@@ -440,11 +440,40 @@ class POJ104TripletDataset(Dataset):
     def __len__(self):
         return len(self.dataset)
 
+# Bit hacky but will do
+class POJ104RandomTripletDataset(Dataset):
+    """Simple wrapper for sampling triplets from the dataset 'semeru/Code-Code-CloneDetection-POJ104'"""
+    
+    def __init__(self, poj_dataset, tokenizer_name: str):
+        self.dataset = poj_dataset
+        self.lbl_to_idx = defaultdict(list)
+        for idx, item in enumerate(poj_dataset): self.lbl_to_idx[item["label"]].append(idx)
+        self.labels = list(self.lbl_to_idx.keys())
+        self.tokenizer = get_tokenizer_instance(tokenizer_name)
+        self.tokenizer_params = get_tokenizer_params(self.tokenizer.model_max_length)
+
+    def __getitem__(self, label):
+        # Positive sample
+        pos_indices = self.lbl_to_idx[label]
+        pos_ind_1, pos_ind_2 = random.sample(pos_indices, k=2)
+        positive_1 = self.dataset[pos_ind_1]
+        positive_2 = self.dataset[pos_ind_2]
+        code_1, code_2 = positive_1["code"], positive_2["code"]
+        # Encode the sequences for sequence pair similarity
+        enc_1, enc_2 = encode_tuple((code_1, code_2), self.tokenizer, self.tokenizer_params)
+        # Hacky dummy encoding for negative placeholder
+        enc_dummy = {k: torch.rand(0, v.shape[-1]) for k, v in enc_1.items()}
+        # Return the tokenized encodings
+        return enc_1, enc_2, enc_dummy
+
+    def __len__(self):
+        return len(self.labels)
+
 
 def Create_POJ104_triplet_dataset(tokenizer_name: str):
     poj_dataset = datasets.load_dataset("semeru/Code-Code-CloneDetection-POJ104")
-    train_dataset = POJ104TripletDataset(poj_dataset["train"], tokenizer_name)
-    valid_dataset = POJ104TripletDataset(poj_dataset["validation"], tokenizer_name)
+    train_dataset = POJ104RandomTripletDataset(poj_dataset["train"], tokenizer_name)
+    valid_dataset = POJ104RandomTripletDataset(poj_dataset["validation"], tokenizer_name)
     test_dataset_map = POJ104Dataset(poj_dataset["test"], tokenizer_name)
     test_dataset_cls = POJ104TripletDataset(poj_dataset["test"], tokenizer_name)
     return train_dataset, valid_dataset, test_dataset_map, test_dataset_cls

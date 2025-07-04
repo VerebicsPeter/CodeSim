@@ -387,4 +387,5 @@ def compute_loss_combined(
     loss_2 = trainer.loss_func(A, POS, NEG)  # Local loss
     return w_1 * loss_1 + w_2 * loss_2
 
+
 # TODO: Combined loss function for contrastive and classification objectives
