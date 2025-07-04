@@ -188,6 +188,23 @@ def finetune_model_contrastive(config: configs.CodeSimContrastiveClassifierConfi
         dropout_rate=config.dropout_rate,
     )
     model.to(DEVICE)
+    
+    no_decay = ['bias', 'LayerNorm.weight']
+    param_groups = [
+        {
+            'params': [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
+            'weight_decay': config.wd_enc
+        },
+        {
+            'params': [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)],
+            'weight_decay': 0.0
+        },
+    ]
+
+    print("no decay:", no_decay)
+    
+    # Trainer
+    optimizer = torch.optim.AdamW(param_groups, lr=config.lr_enc)
 
     # Trainer
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.lr_enc, weight_decay=config.wd_enc)
