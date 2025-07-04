@@ -158,13 +158,15 @@ def finetune_model_contrastive(config: configs.CodeSimContrastiveClassifierConfi
                 num_batches=config.num_batches,
                 num_pids_per_batch=config.bs
             ),
-            collate_fn=code_sim_datasets.custom_collate_triplet
+            collate_fn=code_sim_datasets.custom_collate_POJpair
         )
+        
         valid_loader = DataLoader(
             valid_data, batch_size=config.bs,
             sampler=code_sim_datasets.CodeNetDefaultTripletSampler(valid_data.labels),
-            collate_fn=code_sim_datasets.custom_collate_triplet
+            collate_fn=code_sim_datasets.custom_collate_POJpair
         )
+        
         test_loader_map = DataLoader(test_data_map, batch_size=config.bs, shuffle=False)
         test_loader_cls = DataLoader(test_data_cls, batch_size=config.bs, shuffle=False)
     else:
@@ -208,7 +210,7 @@ def finetune_model_contrastive(config: configs.CodeSimContrastiveClassifierConfi
             'weight_decay': config.wd_enc
         },
         {
-            'params': [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)],
+            'params': [p for n, p in model.named_parameters() if     any(nd in n for nd in no_decay)],
             'weight_decay': 0.0
         },
     ]
@@ -217,9 +219,6 @@ def finetune_model_contrastive(config: configs.CodeSimContrastiveClassifierConfi
     
     # Trainer
     optimizer = torch.optim.AdamW(param_groups, lr=config.lr_enc)
-
-    # Trainer
-    optimizer = torch.optim.AdamW(model.parameters(), lr=config.lr_enc, weight_decay=config.wd_enc)
     scheduler = get_scheduler(train_loader, optimizer, config.epochs, config.iters_to_accumulate)
     trainer = code_sim_models.CodeSimilarityTrainer(
         model,

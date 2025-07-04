@@ -39,6 +39,18 @@ def custom_collate_triplet(batch):
     return encsA, encsP, encsNS
 
 
+def custom_collate_POJpair(batch):
+    A, P = [], []
+    for a,p in batch:
+        A.append(a)
+        P.append(p)
+    encsA = default_data_collator(A)
+    encsP = default_data_collator(P)
+    # Hacky dummy encoding for negative placeholder
+    encs_dummy = {k: torch.rand(0, v.shape[-1]) for k, v in encsA.items()}
+    return encsA, encsP, encs_dummy
+
+
 def get_tokenizer_instance(tokenizer_name: str):
     if tokenizer_name == "Qwen/Qwen3-Embedding-0.6B":
         return transformers.AutoTokenizer.from_pretrained(tokenizer_name, padding_side='left')
@@ -440,7 +452,7 @@ class POJ104TripletDataset(Dataset):
     def __len__(self):
         return len(self.dataset)
 
-# Bit hacky but will do
+
 class POJ104RandomTripletDataset(Dataset):
     """Simple wrapper for sampling triplets from the dataset 'semeru/Code-Code-CloneDetection-POJ104'"""
     
@@ -461,10 +473,8 @@ class POJ104RandomTripletDataset(Dataset):
         code_1, code_2 = positive_1["code"], positive_2["code"]
         # Encode the sequences for sequence pair similarity
         enc_1, enc_2 = encode_tuple((code_1, code_2), self.tokenizer, self.tokenizer_params)
-        # Hacky dummy encoding for negative placeholder
-        enc_dummy = {k: torch.rand(0, v.shape[-1]) for k, v in enc_1.items()}
         # Return the tokenized encodings
-        return enc_1, enc_2, enc_dummy
+        return enc_1, enc_2
 
     def __len__(self):
         return len(self.labels)
