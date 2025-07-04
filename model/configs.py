@@ -39,25 +39,29 @@ class BaseConfig:
     bs: int = 20  # batch size
     iters_to_accumulate: int = 2
     
-    def patched_init_model(self):
+    def init_model(self):
         print(f"Pretrained checkpoint name: {self.pretrained_model_name}")
         
         if self.pretrained_model is None:
             print("Initializing encoder model.")
             self.pretrained_model = AutoModel.from_pretrained(self.pretrained_model_name)
         
+        wrapped = False
         device = self.pretrained_model.device
         
         if self.lora_config is not None:
             print("Wrapping encoder model with LoRA config for parameter efficient finetuning.")
             self.pretrained_model = get_peft_model(self.pretrained_model, self.lora_config)
+            wrapped = True
         
         if torch.cuda.device_count() > 1:
-            print("Wrapping encoder model with DataParallel for multiple GPU usage.")
-            print(f"Using {torch.cuda.device_count()} GPUs with DataParallel.")
+            print("Wrapping encoder model with DataParallel for multiple GPU usage.",
+                  f"Using {torch.cuda.device_count()} GPUs with DataParallel.")
             self.pretrained_model = nn.DataParallel(self.pretrained_model)
+            wrapped = True
         
-        self.pretrained_model.device = device
+        if wrapped:
+            self.pretrained_model.device = device
 
 @dataclass
 class CodeSimClassifierConfig(BaseConfig):
