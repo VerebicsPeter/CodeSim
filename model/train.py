@@ -1,9 +1,6 @@
 # TODO: Parametrize data path
 # TODO: Implement data aggregator and compute metrics hooks
 
-
-import matplotlib.pyplot as plt
-
 from tqdm import tqdm
 from functools import partial
 
@@ -14,7 +11,6 @@ from torch.utils.data import DataLoader
 
 from transformers import AutoTokenizer, get_linear_schedule_with_warmup
 
-from sklearn.metrics import classification_report, roc_curve, auc
 
 from model.code_sim_models import (
     CodeSimLinearClassifierCross,
@@ -28,35 +24,14 @@ from model.code_sim_models import (
 )
 import model.code_sim_models as code_sim_models
 import model.code_sim_datasets as code_sim_datasets
-import model.metrics as metrics
 import model.configs as configs
+import model.metrics as metrics
+from model.metrics import print_reports
 from model.utils import set_seed
 
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 NO_DECAY = ['bias', 'LayerNorm.weight']
-
-
-def print_reports(y_true, y_pred, thresholds=(.5,.7,.9)):
-    
-    for threshold in thresholds:
-        report = classification_report(y_true, [int(pred > threshold) for pred in y_pred])
-        print(f"REPORT @ threshold={threshold}")
-        print(report)
-    
-    fpr, tpr, thresholds = roc_curve(y_true, y_pred)
-    _auc = auc(fpr, tpr)
-    # Plot the ROC curve
-    plt.figure()
-    plt.plot(fpr, tpr, color='blue', lw=2, label=f'(AUC = {_auc:.2f})')
-    plt.plot([0, 1], [0, 1], color='gray', linestyle='--')
-    plt.xlabel('FPR')
-    plt.ylabel('TPR')
-    plt.title('ROC Curve')
-    plt.legend(loc='lower right')
-    plt.savefig("roc_curve.png")
-    plt.show()
 
 
 def get_param_groups(model, wd):
@@ -329,7 +304,7 @@ def finetune_model_on_POJ_104(config: configs.CodeSimContrastiveClassifierConfig
         loss_func=loss_func,
         loss_hook=loss_hook,
         aggr_hook=aggr_data_contrastive_map,
-        compute_metrics=metrics.calculate_map_at_R,
+        compute_metrics=metrics.calculate_map_metrics,
         target_metrics=["map_r"],
         loss_checkpointing=False,
         optimizer=optimizer,

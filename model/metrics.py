@@ -2,6 +2,15 @@ import torch
 import numpy as np
 from tqdm import tqdm
 from collections import defaultdict
+import matplotlib.pyplot as plt
+
+from sklearn.metrics import (
+    roc_curve,
+    auc,
+    roc_auc_score,
+    precision_recall_curve,
+    classification_report,
+)
 
 
 def calculate_sim_mat(embeddings: torch.Tensor):
@@ -43,8 +52,11 @@ def calculate_map_at_R(embeddings: torch.Tensor, labels, R=499):
     return {"map_r": map_r}
 
 
+def calculate_map_metrics(all_embs, all_lbls):
+    return calculate_map_at_R(all_embs, all_lbls, R=499)
+
+
 def calculate_cls_metrics(y_true, y_pred):
-    from sklearn.metrics import roc_auc_score, precision_recall_curve
     # NOTE: `y_pred` values are logits
     
     # F1 score (on best threshold)
@@ -57,3 +69,24 @@ def calculate_cls_metrics(y_true, y_pred):
     roc_auc = roc_auc_score(y_true, y_pred)
     
     return {"F1": f1, "roc_auc": roc_auc}
+
+
+def print_reports(y_true, y_pred, thresholds=(.5,.7,.9)):
+    
+    for threshold in thresholds:
+        report = classification_report(y_true, [int(pred > threshold) for pred in y_pred])
+        print(f"REPORT @ threshold={threshold}")
+        print(report)
+    
+    fpr, tpr, thresholds = roc_curve(y_true, y_pred)
+    _auc = auc(fpr, tpr)
+    # Plot the ROC curve
+    plt.figure()
+    plt.plot(fpr, tpr, color='blue', lw=2, label=f'(AUC = {_auc:.2f})')
+    plt.plot([0, 1], [0, 1], color='gray', linestyle='--')
+    plt.xlabel('FPR')
+    plt.ylabel('TPR')
+    plt.title('ROC Curve')
+    plt.legend(loc='lower right')
+    plt.savefig("roc_curve.png")
+    plt.show()
