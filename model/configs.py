@@ -51,8 +51,8 @@ class BaseConfig:
         if self.lora_config is not None:
             print("Wrapping encoder model with LoRA config for parameter efficient finetuning.")
             self.pretrained_model = get_peft_model(self.pretrained_model, self.lora_config)
-        
-        self.pretrained_model.device = device
+            # Ensure the model is on the correct device
+            self.pretrained_model.device = device
             
 
 @dataclass

@@ -80,6 +80,14 @@ def freeze_model(model: nn.Module):
     for param in model.parameters(): param.requires_grad = False
 
 
+def unwrap_model(model: nn.Module) -> nn.Module:
+    """ Unwraps the model from the trainer if it is wrapped in a trainer."""
+    if isinstance(model, nn.DataParallel):
+        return model.module
+    else:
+        return model
+
+
 def put_batch_encoding_to_device(encoding: BatchEncoding, device):
     for k, v in encoding.items(): encoding[k] = v.to(device)
 
@@ -269,7 +277,7 @@ class CodeSimilarityTrainer(Trainer):
                 loss = self.loss_hook(self, data)
                 sum_loss += loss.item()
             if self.target_metrics:
-                _ = self.aggr_hook(self.model, data, aggr_data)
+                _ = self.aggr_hook(unwrap_model(self.model), data, aggr_data)
         
         if self.target_metrics:
             metrics = self.compute_metrics(**aggr_data)
