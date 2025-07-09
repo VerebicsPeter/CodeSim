@@ -1,4 +1,5 @@
 import torch
+import numpy as np
 from tqdm import tqdm
 from collections import defaultdict
 
@@ -14,13 +15,13 @@ def calculate_sim_mat(embeddings: torch.Tensor):
 def calculate_map_at_R(embeddings: torch.Tensor, labels, R=499):
     assert embeddings.shape[0] == len(labels), "Number of embeddings and labels must match."
     
-    print(f"Calculating MAP@{R} score.")
+    print(f"Calculating MAP@R={R} score.")
     
     N = len(labels)
     label_counts = defaultdict(lambda:-1)
     for label in labels: label_counts[label.item()] += 1
     
-    map_score = 0.0
+    map_r = 0.0
     sim_mat = calculate_sim_mat(embeddings)
     
     # Calculate MAP score of queries
@@ -36,7 +37,23 @@ def calculate_map_at_R(embeddings: torch.Tensor, labels, R=499):
                 ap += nh / (k+1)
         count = label_counts[true_label.item()]
         if nh > 0: ap /= count  # IMPORTANT: normalized by instance count not TP count
-        map_score += ap
+        map_r += ap
     # Normalize by number of queries to get MAP
-    map_score /= N
-    return map_score
+    map_r /= N
+    return {"map_r": map_r}
+
+
+def calculate_cls_metrics(y_true, y_pred):
+    from sklearn.metrics import roc_auc_score, precision_recall_curve
+    # NOTE: `y_pred` values are logits
+    
+    # F1 score (on best threshold)
+    eps = 1e-8
+    pre, rec, _ = precision_recall_curve(y_true, y_pred)
+    f1s = 2 * (pre * rec) / (pre + rec + eps)
+    f1 = f1s[np.argmax(f1s)]
+    
+    # ROC curve AUC
+    roc_auc = roc_auc_score(y_true, y_pred)
+    
+    return {"F1": f1, "roc_auc": roc_auc}

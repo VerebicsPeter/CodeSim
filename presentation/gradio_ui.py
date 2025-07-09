@@ -29,7 +29,7 @@ MODEL_INST = train.CodeSimContrastiveEncoder(BERT_INST)
 MODEL_INST.eval()
 print("Model set to evaluation mode.")
 
-# NOTE: this is not good for an online app...
+# TODO: this is not good for an online app... use state
 __CODE_SUBSEQ_CACHE = {
     "code1": [],
     "code2": [],
@@ -42,7 +42,6 @@ def embedding_pipeline(codes):
 
 
 def on_process_code(code1, lang1, code2, lang2):
-    # TODO: split code snipepts into semantic parts
     embs = embedding_pipeline([code1, code2])
     cos_sim = F.cosine_similarity(embs[0], embs[1], dim=0)
     cos_sim_str = f"Cosine similarity: {cos_sim}"

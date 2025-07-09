@@ -46,31 +46,24 @@ class BaseConfig:
             print("Initializing encoder model.")
             self.pretrained_model = AutoModel.from_pretrained(self.pretrained_model_name)
         
-        wrapped = False
         device = self.pretrained_model.device
         
         if self.lora_config is not None:
             print("Wrapping encoder model with LoRA config for parameter efficient finetuning.")
             self.pretrained_model = get_peft_model(self.pretrained_model, self.lora_config)
-            wrapped = True
         
-        if torch.cuda.device_count() > 1:
-            print("Wrapping encoder model with DataParallel for multiple GPU usage.",
-                  f"Using {torch.cuda.device_count()} GPUs with DataParallel.")
-            self.pretrained_model = nn.DataParallel(self.pretrained_model)
-            wrapped = True
-        
-        if wrapped:
-            self.pretrained_model.device = device
+        self.pretrained_model.device = device
+            
 
 @dataclass
 class CodeSimClassifierConfig(BaseConfig):
     finetuning_strategy: str = FINETUNING_STRATEGIES[0]
     # Learning rates and weight decays
-    lr: float = 1e-5
-    wd: float = 1e-5
+    lr_enc: float = 1e-5  # Encoder learning rate
+    wd_enc: float = 1e-5  # Encoder weight decay
     # Model specific parameters
     dropout_rate: float = 0.2
+    # Other
     shuffle_dataloader: bool = True
 
 

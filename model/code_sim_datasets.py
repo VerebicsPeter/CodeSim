@@ -1,30 +1,30 @@
 # Dataset wrappers for CodeNet data
-import os
-import gdown
+from tqdm import tqdm
 import pandas as pd
 import pprint as pp
 import random
 import datasets
-import transformers
 from transformers import default_data_collator
 import torch
 from torch.utils.data import Dataset, DataLoader, Sampler, Subset
 from collections import defaultdict
-
-# TODO: Maybe load URLS from a .env or something
-# TODO: Create proper dataset with train, validation, evalualion splits for clean evaluation,
-# idea: pick a set of 'evaluation' problems distinct from training and validation problems
-COLUMNS = ["problem_id", "submission_id", "status", "code"]
-DATASET_URL_SMALL = "https://drive.google.com/uc?export=download&id=1hZ4_QjTcmesQYsPo75G1lyIe__HFfwbG"
-DATASET_URL_LARGE = "https://drive.google.com/uc?export=download&id=10ok2e2BmWRVhn_V6tRBZzLfeYQ0eaJA2"
-DATASET_URL_118 = "https://drive.google.com/uc?export=download&id=1cV_Qv1ZSraQHo6G1HSEu82LKZxUsxTgw"
-DATASET_URL = DATASET_URL_118
+from functools import partial
 
 # NOTE: Therse are old datasets
-OLD_DATASET_URLS = {
+__DATASET_URL_SMALL = "https://drive.google.com/uc?export=download&id=1hZ4_QjTcmesQYsPo75G1lyIe__HFfwbG"
+__DATASET_URL_LARGE = "https://drive.google.com/uc?export=download&id=10ok2e2BmWRVhn_V6tRBZzLfeYQ0eaJA2"
+__OLD_DATASET_URLS = {
     "paired" : "https://drive.google.com/uc?export=download&id=1pUErbyZw1fBC5gIe6KT7BWga7h6Bfr4l",
     "triplet": "https://drive.google.com/uc?export=download&id=11aBIxIMEMKoGyJ9IdUHY2XQv1ZzfyXd2",
+    # NOTE: These have scheme "problem_id,submission_id,status,code",
+    # NOTE: To reproduce original splits: random_state=42, split group via iloc with ratios 0.8, 0.1, 0.1
+    "small": __DATASET_URL_SMALL,
+    "large": __DATASET_URL_LARGE,
 }
+
+
+def tokenize_fn(tokenizer, tokenizer_args, examples):
+    return tokenizer(examples["code"], **tokenizer_args)
 
 
 def custom_collate_triplet(batch):
@@ -51,67 +51,6 @@ def custom_collate_POJpair(batch):
     return encsA, encsP, encs_dummy
 
 
-def get_tokenizer_instance(tokenizer_name: str):
-    if tokenizer_name == "Qwen/Qwen3-Embedding-0.6B":
-        return transformers.AutoTokenizer.from_pretrained(tokenizer_name, padding_side='left')
-    else:
-        return transformers.AutoTokenizer.from_pretrained(tokenizer_name)
-
-
-def get_tokenizer_params(max_length: int):
-    return {
-        "padding": "max_length",  # Pad to max_length
-        "max_length": max_length,
-        "truncation": True,  # Truncate to max_length
-        "return_tensors": "pt",  # Return torch.Tensor objects
-    }
-
-
-def split_df(df: pd.DataFrame, train_ratio=0.8, valid_ratio=0.1, test_ratio=0.1, random_state=42):
-    assert train_ratio + valid_ratio + test_ratio == 1.0, "Ratios must sum to 1"
-    # Initializes empty lists to collect split data
-    dfs = defaultdict(list)
-    
-    # Shuffle and split each class separately
-    for problem_id, group in df.groupby("problem_id"):
-        group = group.sample(frac=1, random_state=random_state)  # shuffle
-        
-        n_total = len(group)
-        n_train = int(n_total * train_ratio)
-        n_valid = int(n_total * valid_ratio)
-
-        train = group.iloc[:n_train]
-        valid = group.iloc[ n_train:
-                           n_train + n_valid]
-        test  = group.iloc[n_train + n_valid:]
-
-        dfs["train"].append(train)
-        dfs["valid"].append(valid)
-        dfs["test"].append(test)
-
-    train_df = pd.concat(dfs["train"]).sample(frac=1, random_state=random_state).reset_index(drop=True)
-    valid_df = pd.concat(dfs["valid"]).sample(frac=1, random_state=random_state).reset_index(drop=True)
-    test_df = pd.concat(dfs["test"]).sample(frac=1, random_state=random_state).reset_index(drop=True)
-    return train_df, valid_df, test_df
-
-
-def load_dataset(url=DATASET_URL, columns=COLUMNS):
-    path = "dataset.csv"
-    
-    if not os.path.isfile(path=path):
-        output = path
-        gdown.download(url=url, output=output, quiet=False)
-    
-    df = pd.read_csv("dataset.csv", header=0, names=columns)
-    print('\n', df.describe(), '\n')
-    print("Splitting dataset...")
-    
-    train_df, valid_df, test_df = split_df(df)
-    
-    print(f"Train size: {len(train_df)}, Valid size: {len(valid_df)}, Test size: {len(test_df)}")
-    return train_df, valid_df, test_df
-
-
 def get_loaders(train_data, valid_data, test_data, bs, shuffle, num_workers=4, num_rows=None):
     if num_rows is not None:
         print(f"Limiting dataset to {num_rows} rows.")
@@ -124,212 +63,240 @@ def get_loaders(train_data, valid_data, test_data, bs, shuffle, num_workers=4, n
     return train_loader, valid_loader, test_loader
 
 
-def encode_tuple(t: tuple[str], tokenizer, tokenizer_params):
-    encodings = tokenizer(t, **tokenizer_params)
-    # return tuple of encodings (used in default collate_fn)
-    return tuple({k: v[i] for k,v in encodings.items()} for i in range(len(t)))
-
-
-# TODO: augment pairs by flipping the order of the pair
-class CodeNetPairDataset(Dataset):
-    """Dataset for BERT encodings from (fixed) CodeNet code pairs."""
-
-    def __init__(
-        self,
-        pids, pairs, labels,
-        tokenizer_name: str,
-        tokenizer_max_length: int = 256,
-        return_single_encoding: bool = True,
-    ):
-        super().__init__()
-        
-        assert len(pids) == len(pairs) == len(labels), "Length MUST match!"
-        self.pids = pids
-        self.pairs = pairs
-        self.labels = labels
-        self.return_single_encoding = return_single_encoding
-        
-        self.tokenizer = get_tokenizer_instance(tokenizer_name)
-        self.tokenizer_params = get_tokenizer_params(tokenizer_max_length)
-        self.encoded_pairs = [self._encode_pair(pair) for pair in pairs]
-
-    def _encode_pair(self, pair):
-        code_a, code_b = pair
-        if self.return_single_encoding:
-            # Encode the sequences for sequence pair classification
-            # ([CLS], code_a tokens , [SEP], code_b tokens, [SEP])
-            encoding = self.tokenizer(code_a, code_b, **self.tokenizer_params)
-            return {k: v.squeeze(0) for k, v in encoding.items()}
+def init_problem_indices(hf_dataset):
+    problem_id_to_passing_idxs = defaultdict(list)
+    problem_id_to_failing_idxs = defaultdict(list)
+    
+    for idx, item in tqdm(enumerate(hf_dataset)):
+        if item["status"] == "Accepted":
+            problem_id_to_passing_idxs[item["problem_id"]].append(idx)
         else:
-            encodings = encode_tuple(pair, self.tokenizer, self.tokenizer_params)
-            return encodings
+            problem_id_to_failing_idxs[item["problem_id"]].append(idx)
+    
+    return {
+        "id_to_passing": problem_id_to_passing_idxs,
+        "id_to_failing": problem_id_to_failing_idxs
+    }
+
+
+class CodeNetPairDataset(Dataset):
+    """Dataset for fixed CodeNet code pairs."""
+
+    def __init__(self, hf_dataset, num_pairs_per_problem=100, random_state=42,
+                 return_single_encoding=False, tokenizer=None, tokenizer_args=None):
+        self.hf_dataset = hf_dataset
+        self.problem_ids = sorted(set(hf_dataset["problem_id"]))
+        result = init_problem_indices(hf_dataset)
+        self.problem_id_to_passing_idxs = result["id_to_passing"]
+        self.problem_id_to_failing_idxs = result["id_to_failing"]
+        
+        self.return_single_encoding = return_single_encoding
+        # Tokenizer instance for singe-encoding tokenization
+        if not self.return_single_encoding:
+            assert tokenizer is not None, "Please pass tokenizer for single-encoding tokenization."
+            self.tokenizer = tokenizer
+            self.tokenizer_args = tokenizer_args or {}
+        
+        self.pair_idxs = []
+        rng = random.Random(random_state)
+        N = num_pairs_per_problem
+        for pid in self.problem_ids:
+            pos_idxs = rng.sample(self.problem_id_to_passing_idxs[pid], 2*N)
+            neg_idxs = rng.sample(self.problem_id_to_failing_idxs[pid],   N)
+            # Positive pairs (passing, passing)
+            self.pair_idxs.extend(zip(pos_idxs[:N], pos_idxs[N:], N*[1]))
+            # Negative pairs (passing, failing)
+            self.pair_idxs.extend(zip(pos_idxs[:N], neg_idxs[:N], N*[0]))
+    
+    def __len__(self):
+        return len(self.pair_idxs)
     
     def __getitem__(self, idx):
-        label = self.labels[idx]
-        encoding = self.encoded_pairs[idx]
-        if self.return_single_encoding:
-            return  encoding, label
+        keys = ["input_ids", "attention_mask"]
+        idx_1, idx_2, label = self.pair_idxs[idx]
+        if not self.return_single_encoding:
+            code_1 = self.hf_dataset[idx_1]["code"]
+            code_2 = self.hf_dataset[idx_2]["code"]
+            enc = self.tokenizer(code_1, code_2, **self.tokenizer_args)
+            return enc, label
         else:
-            return *encoding, label
-
-    def __len__(self):
-        return len(self.labels)
-
-    @classmethod
-    def from_pandas_df(
-        cls,
-        df: pd.DataFrame,
-        tokenizer_name: str,
-        tokenizer_max_length: int = 256,
-        return_single_encoding: bool = True,
-    ):
-        pids, pairs, labels = [], [], []
-        
-        for pid, group_df in df.groupby("problem_id"):
-            df_pos = group_df[group_df["status"] == "Accepted"]
-            df_neg = group_df[group_df["status"] != "Accepted"]
-            positives = df_pos["code"].to_list()
-            negatives = df_neg["code"].to_list()
-            n = min(len(positives), len(negatives))
-            if n == 0: continue
-            #print("sampled:", n, "pairs for problem ID:", pid)
-            positives = positives[:n]
-            negatives = negatives[:n]
-            pids.extend([pid] * 2 * n)
-            pairs.extend([*zip(positives, reversed(positives)), *zip(positives, negatives)])
-            labels.extend([1] * n + [0] * n)
-        
-        return cls(pids, pairs, labels, tokenizer_name, tokenizer_max_length, return_single_encoding)
+            enc_1 = {k:v for k,v in self.hf_dataset[idx_1].items() if k in keys}
+            enc_2 = {k:v for k,v in self.hf_dataset[idx_2].items() if k in keys}
+            return enc_1, enc_2, label
 
 
 class CodeNetTripletDataset(Dataset):
-    """Dataset for BERT encodings from (fixed) CodeNet code triplets."""
+    """Dataset for fixed CodeNet code triplets."""
 
-    def __init__(
-        self,
-        pids, triplets,
-        tokenizer_name: str,
-        tokenizer_max_length: int = 256,
-    ):
-        super().__init__()
+    def __init__(self, hf_dataset, num_triplets_per_problem=100, random_state=42):
+        self.hf_dataset = hf_dataset
+        self.problem_ids = sorted(set(hf_dataset["problem_id"]))
+        result = init_problem_indices(hf_dataset)
+        self.problem_id_to_passing_idxs = result["id_to_passing"]
+        self.problem_id_to_failing_idxs = result["id_to_failing"]
         
-        assert len(pids) == len(triplets), "Length MUST match!"
-        self.pids = pids
-        self.triplets = triplets
-        
-        self.tokenizer = get_tokenizer_instance(tokenizer_name)
-        self.tokenizer_params = get_tokenizer_params(tokenizer_max_length)
-        self.encoded_triplets = [self._encode_triplet(triplet) for triplet in triplets]
-
-    def _encode_triplet(self, triplet):
-        anchor, positive, negative = triplet
-        encodings = encode_tuple((anchor, positive, negative), self.tokenizer, self.tokenizer_params)
-        return encodings
-
-    def __getitem__(self, idx):
-        # Return the tokenized encodings
-        encodings = self.encoded_triplets[idx]
-        return encodings
-
+        self.triplet_idxs = []
+        rng = random.Random(random_state)
+        N = num_triplets_per_problem
+        for pid in self.problem_ids:
+            pos_idxs = rng.sample(self.problem_id_to_passing_idxs[pid], 2*N)
+            neg_idxs = rng.sample(self.problem_id_to_failing_idxs[pid],   N)
+            # anchor, positive, negative triplet
+            self.triplet_idxs.extend(zip(pos_idxs[:N], pos_idxs[N:], neg_idxs))
+    
     def __len__(self):
-        return len(self.triplets)
-
-    @classmethod
-    def from_pandas_df(
-        cls,
-        df: pd.DataFrame,
-        tokenizer_name: str,
-        tokenizer_max_length: int = 256,
-    ):
-        pids, triplets = [], []
-        
-        for pid, group_df in df.groupby("problem_id"):
-            df_pos = group_df[group_df["status"] == "Accepted"]
-            df_neg = group_df[group_df["status"] != "Accepted"]
-            positives = df_pos["code"].to_list()
-            pos1 = positives[:len(positives)//2 ]
-            pos2 = positives[ len(positives)//2:]
-            negatives = df_neg["code"].to_list()
-            n = min(len(pos1), len(pos2), len(negatives))
-            if n == 0: continue
-            #print("sampled:", n, "triplets for problem ID:", pid)
-            pids.extend([pid] * n)
-            triplets.extend(zip(pos1[:n], pos2[:n], negatives[:n]))
-
-        return cls(pids, triplets, tokenizer_name, tokenizer_max_length)
+        return len(self.triplet_idxs)
+    
+    def __getitem__(self, idx):
+        keys = ["input_ids", "attention_mask"]
+        a_idx, p_idx, n_idx = self.triplet_idxs[idx]
+        a_enc = {k:v for k,v in self.hf_dataset[a_idx].items() if k in keys}
+        p_enc = {k:v for k,v in self.hf_dataset[p_idx].items() if k in keys}
+        n_enc = {k:v for k,v in self.hf_dataset[n_idx].items() if k in keys}
+        return a_enc, p_enc, n_enc
 
 
 class CodeNetRandomTripletDataset(Dataset):
-    """Dataset for BERT encodings from CodeNet code triplets."""
-
-    def __init__(
-        self,
-        # NOTE: PID contains the list of problem IDs to sample in an epoch
-        pid_to_pos,
-        pid_to_neg,
-        tokenizer_name: str,
-        tokenizer_max_length: int = 256,
-        num_negatives: int = 1, # number of same problem (hard) negatives
-        deterministic: bool = False,
-    ):
-        super().__init__()
-        all_pids = set(pid_to_pos.keys()) & set(pid_to_neg.keys())
-        self.pids = list(all_pids)
-        self.pid_to_pos = pid_to_pos
-        self.pid_to_neg = pid_to_neg
-        self.num_negatives = num_negatives
+    def __init__(self, hf_dataset, deterministic = False, num_negatives = 1):
+        self.hf_dataset = hf_dataset
+        self.problem_ids = sorted(set(hf_dataset["problem_id"]))
+        result = init_problem_indices(hf_dataset)
+        self.problem_id_to_passing_idxs = result["id_to_passing"]
+        self.problem_id_to_failing_idxs = result["id_to_failing"]
+        
         self.deterministic = deterministic
-        
-        self.tokenizer = get_tokenizer_instance(tokenizer_name)
-        self.tokenizer_params = get_tokenizer_params(tokenizer_max_length)
-        
-        enc_func_1 = lambda code: self.tokenizer(code, **self.tokenizer_params)
-        enc_func_2 = lambda enc: {k: v.squeeze(0) for k, v in enc.items()}
-        
-        self.pid_to_pos_enc = {
-            pid: list(map(enc_func_2, map(enc_func_1, pos_codes)))
-            for pid, pos_codes in pid_to_pos.items()
-        }
-        self.pid_to_neg_enc = {
-            pid: list(map(enc_func_2, map(enc_func_1, pos_codes)))
-            for pid, pos_codes in pid_to_neg.items()
-        }
-
-    def __getitem__(self, pid: str):
-        rng = random.Random(x=42) if self.deterministic else random
-        # NOTE: anchor and postive may be the same code, see SimCSE paper
-        a = rng.choice(self.pid_to_pos_enc[pid])
-        p = rng.choice(self.pid_to_pos_enc[pid])
-        ns = rng.sample(self.pid_to_neg_enc[pid], k=self.num_negatives)
-        return a, p, ns
+        self.num_negatives = num_negatives
 
     def __len__(self):
-        return len(self.pids)
+        return len(self.problem_ids)
 
-    @classmethod
-    def from_pandas_df(
-        cls,
-        df: pd.DataFrame,
-        tokenizer_name: str,
-        tokenizer_max_length: int = 256,
-        num_negatives: int = 1,
-        deterministic: bool = False,
-    ):
-        pid_to_pos = {}
-        pid_to_neg = {}
-        
-        for pid, group_df in df.groupby("problem_id"):
-            df_pos = group_df[group_df["status"] == "Accepted"]
-            df_neg = group_df[group_df["status"] != "Accepted"]
-            positives = df_pos["code"].to_list()
-            negatives = df_neg["code"].to_list()
-            pid_to_pos[pid] = positives
-            pid_to_neg[pid] = negatives
-
-        return cls(pid_to_pos, pid_to_neg, tokenizer_name, tokenizer_max_length, num_negatives, deterministic)
+    def __getitem__(self, pid: str):
+        keys = ["input_ids", "attention_mask"]
+        rng = random.Random(x=42) if self.deterministic else random
+        # NOTE: anchor and postive may be the same code, see SimCSE paper
+        a_idx = rng.choice(self.problem_id_to_passing_idxs[pid])
+        p_idx = rng.choice(self.problem_id_to_passing_idxs[pid])
+        n_idxs = rng.sample(self.problem_id_to_failing_idxs[pid], k=self.num_negatives)
+        a_enc = {k:v for k,v in self.hf_dataset[a_idx].items() if k in keys}
+        p_enc = {k:v for k,v in self.hf_dataset[p_idx].items() if k in keys}
+        n_encs = [{k:v for k,v in self.hf_dataset[n_idx].items() if k in keys} for n_idx in n_idxs]
+        return a_enc, p_enc, n_encs
 
 
-class CodeNetDefaultTripletSampler(Sampler):
+class POJ104Dataset(Dataset):
+    """Simple wrapper for the POJ-104 dataset."""
+    
+    def __init__(self, poj_dataset, tokenizer, tokenizer_args):
+        self.dataset = poj_dataset
+        self.tokenizer, self.tokenizer_args = tokenizer, tokenizer_args
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        item = self.dataset[idx]
+        enc = self.tokenizer(item["code"], **self.tokenizer_args)
+        enc = {k: v.squeeze(0) for k, v in enc.items()}  # remove batch dim
+        label = torch.tensor(int(item["label"])).long()
+        return enc, label
+
+
+class POJ104RandomTripletDataset(Dataset):
+    """Simple wrapper for the POJ-104 dataset."""
+
+    def __init__(self, poj_dataset, deterministic = False, sample_negative = False):
+        self.poj_dataset = poj_dataset
+        self.problem_ids = sorted(set(poj_dataset["label"]))
+        self.problem_id_to_encs = defaultdict(list)
+        self.deterministic = deterministic
+        self.sample_negative = sample_negative
+
+        for item in tqdm(poj_dataset):
+            self.problem_id_to_encs[item["label"]].append({
+                "input_ids"     : item["input_ids"],
+                "attention_mask": item["attention_mask"]
+            })
+
+    def __len__(self):
+        return len(self.problem_ids)
+
+    def __getitem__(self, pid):
+        rng = random.Random(x=42) if self.deterministic else random
+        # Positive sample
+        enc_1, enc_2 = rng.sample(self.problem_id_to_encs[pid], k=2)
+
+        if not self.sample_negative:
+            return enc_1, enc_2
+        else:
+            # NOTE: this is for triplet loss training
+            pid_neg = rng.choice(list(filter(lambda x : x!=pid, self.problem_ids)))
+            enc_neg = rng.choice(self.problem_id_to_encs[pid_neg])
+            return enc_1, enc_2, enc_neg
+
+
+def Create_CodeNet_paired_dataset(
+    tokenizer,
+    tokenizer_args,
+    data_path="peterverebics/CodeNet_Python_118",
+    return_single_encoding=True,
+):
+    print("Creating CodeNet dataset. Data type: paired")
+    tokenize = partial(tokenize_fn, tokenizer, tokenizer_args)
+    
+    dataset = datasets.load_dataset(data_path).map(tokenize, batched=True)
+    dataset.set_format(type="torch", columns=["input_ids", "attention_mask"], output_all_columns=True)
+    
+    train_ds = CodeNetPairDataset(dataset["train"],
+                                  return_single_encoding=return_single_encoding,
+                                  tokenizer=tokenizer, tokenizer_args=tokenizer_args)
+    valid_ds = CodeNetPairDataset(dataset["validation"],
+                                  return_single_encoding=return_single_encoding,
+                                  tokenizer=tokenizer, tokenizer_args=tokenizer_args)
+    test_ds  = CodeNetPairDataset(dataset["test"],
+                                  return_single_encoding=return_single_encoding,
+                                  tokenizer=tokenizer, tokenizer_args=tokenizer_args)
+    return train_ds, valid_ds, test_ds
+
+
+def Create_CodeNet_triplet_dataset(
+    tokenizer,
+    tokenizer_args,
+    data_path="peterverebics/CodeNet_Python_118",
+    num_negatives=1,
+):
+    print("Creating CodeNet dataset. Data type: triplet")
+    tokenize = partial(tokenize_fn, tokenizer, tokenizer_args)
+    
+    dataset = datasets.load_dataset(data_path).map(tokenize, batched=True)
+    dataset.set_format(type="torch", columns=["input_ids", "attention_mask"], output_all_columns=True)
+    
+    train_ds = CodeNetRandomTripletDataset(dataset["train"],
+                                           num_negatives=num_negatives, deterministic=False)
+    valid_ds = CodeNetRandomTripletDataset(dataset["validation"],
+                                           num_negatives=num_negatives, deterministic=True)
+    test_ds = CodeNetTripletDataset(dataset["test"])
+    return train_ds, valid_ds, test_ds
+
+
+def Create_POJ104_triplet_dataset(
+    tokenizer,
+    tokenizer_args,
+    sample_negative=False,
+):
+    tokenize = partial(tokenize_fn, tokenizer, tokenizer_args)
+    poj_dataset = datasets.load_dataset("semeru/Code-Code-CloneDetection-POJ104").map(tokenize, batched=True)
+    poj_dataset.set_format(type="torch", columns=["input_ids", "attention_mask"], output_all_columns=True)
+    
+    train_ds = POJ104RandomTripletDataset(poj_dataset["train"],
+                                          sample_negative=sample_negative)
+    valid_ds = POJ104Dataset(poj_dataset["validation"],
+                             tokenizer, tokenizer_args)
+    test_ds  = POJ104Dataset(poj_dataset["test"],
+                             tokenizer, tokenizer_args)
+    return train_ds, valid_ds, test_ds
+
+
+class DefaultTripletSampler(Sampler):
     def __init__(self, pids):
         self.pids = pids
     
@@ -340,7 +307,7 @@ class CodeNetDefaultTripletSampler(Sampler):
         return len(self.pids)
 
 
-class CodeNetRandomTripletBatchSampler(Sampler):
+class RandomTripletBatchSampler(Sampler):
     def __init__(self, pids, num_batches, num_pids_per_batch):
         self.pids = pids
         self.num_batches = num_batches
@@ -352,138 +319,3 @@ class CodeNetRandomTripletBatchSampler(Sampler):
 
     def __len__(self):
         return self.num_batches
-
-
-def Create_CodeNet_paired_dataset(
-    tokenizer_name: str,
-    tokenizer_max_length=256,
-    data_path=DATASET_URL,
-    return_single_encoding=True,
-):
-    print("Creating CodeNet dataset. Data type: paired")
-    train_df, valid_df, test_df = load_dataset(url=data_path)
-    
-    _kwargs = {
-        "tokenizer_name": tokenizer_name,
-        "tokenizer_max_length": tokenizer_max_length,
-        "return_single_encoding": return_single_encoding,
-    }
-    
-    train_ds = CodeNetPairDataset.from_pandas_df(train_df, **_kwargs)
-    valid_ds = CodeNetPairDataset.from_pandas_df(valid_df, **_kwargs)
-    test_ds = CodeNetPairDataset.from_pandas_df(test_df, **_kwargs)
-    return train_ds, valid_ds, test_ds
-
-
-def Create_CodeNet_triplet_dataset(
-    tokenizer_name,
-    tokenizer_max_length=256,
-    data_path=DATASET_URL,
-    num_negatives=1,
-):
-    print("Creating CodeNet dataset. Data type: triplet")
-    train_df, valid_df, test_df = load_dataset(url=data_path)
-    
-    _kwargs = {
-        "tokenizer_name": tokenizer_name,
-        "tokenizer_max_length": tokenizer_max_length,
-    }
-    
-    train_ds = CodeNetRandomTripletDataset.from_pandas_df(train_df, num_negatives=num_negatives, **_kwargs)
-    valid_ds = CodeNetRandomTripletDataset.from_pandas_df(valid_df, num_negatives=num_negatives, deterministic=True, **_kwargs)
-    test_ds = CodeNetTripletDataset.from_pandas_df(test_df , **_kwargs)
-    return train_ds, valid_ds, test_ds
-
-
-class POJ104Dataset(Dataset):
-    """Simple wrapper for the dataset 'semeru/Code-Code-CloneDetection-POJ104'"""
-    
-    def __init__(self, poj_dataset, tokenizer_name: str):
-        self.dataset = poj_dataset
-        
-        self.tokenizer = get_tokenizer_instance(tokenizer_name)
-        self.tokenizer_params = get_tokenizer_params(self.tokenizer.model_max_length)
-
-    def __getitem__(self, idx):
-        item = self.dataset[idx]
-        enc = self.tokenizer(item["code"], **self.tokenizer_params)
-        enc = {k: v.squeeze(0) for k, v in enc.items()}  # remove batch dim
-        lbl = torch.tensor(int(item["label"])).long()
-        return enc, lbl
-
-    def __len__(self):
-        return len(self.dataset)
-
-
-class POJ104TripletDataset(Dataset):
-    """Simple wrapper for sampling triplets from the dataset 'semeru/Code-Code-CloneDetection-POJ104'"""
-    
-    def __init__(self, poj_dataset, tokenizer_name: str):
-        self.dataset = poj_dataset
-        self.lbl_to_idx = defaultdict(list)
-        for idx, item in enumerate(poj_dataset):
-            self.lbl_to_idx[item["label"]].append(idx)
-        self.labels = list(self.lbl_to_idx.keys())
-        
-        self.tokenizer = get_tokenizer_instance(tokenizer_name)
-        self.tokenizer_params = get_tokenizer_params(self.tokenizer.model_max_length)
-
-    def __getitem__(self, idx):
-        anchor = self.dataset[idx]
-
-        # Positive sample
-        pos_label = anchor["label"]
-        pos_index = idx
-        pos_indices = self.lbl_to_idx[pos_label]
-        while pos_index == idx: pos_index = random.choice(pos_indices)
-        positive = self.dataset[pos_index]
-
-        # Negative sample
-        neg_label = random.choice([lbl for lbl in self.labels if lbl != pos_label])
-        neg_index = random.choice(self.lbl_to_idx[neg_label])
-        negative = self.dataset[neg_index]
-
-        code_a, code_p, code_n = anchor["code"], positive["code"], negative["code"]
-        # Encode the sequences for sequence pair similarity
-        enc_a, enc_p, enc_n = encode_tuple((code_a, code_p, code_n), self.tokenizer, self.tokenizer_params)
-        # Return the tokenized encodings
-        return enc_a, enc_p, enc_n
-
-    def __len__(self):
-        return len(self.dataset)
-
-
-class POJ104RandomTripletDataset(Dataset):
-    """Simple wrapper for sampling triplets from the dataset 'semeru/Code-Code-CloneDetection-POJ104'"""
-    
-    def __init__(self, poj_dataset, tokenizer_name: str):
-        self.dataset = poj_dataset
-        self.lbl_to_idx = defaultdict(list)
-        for idx, item in enumerate(poj_dataset): self.lbl_to_idx[item["label"]].append(idx)
-        self.labels = list(self.lbl_to_idx.keys())
-        self.tokenizer = get_tokenizer_instance(tokenizer_name)
-        self.tokenizer_params = get_tokenizer_params(self.tokenizer.model_max_length)
-
-    def __getitem__(self, label):
-        # Positive sample
-        pos_indices = self.lbl_to_idx[label]
-        pos_ind_1, pos_ind_2 = random.sample(pos_indices, k=2)
-        positive_1 = self.dataset[pos_ind_1]
-        positive_2 = self.dataset[pos_ind_2]
-        code_1, code_2 = positive_1["code"], positive_2["code"]
-        # Encode the sequences for sequence pair similarity
-        enc_1, enc_2 = encode_tuple((code_1, code_2), self.tokenizer, self.tokenizer_params)
-        # Return the tokenized encodings
-        return enc_1, enc_2
-
-    def __len__(self):
-        return len(self.labels)
-
-
-def Create_POJ104_triplet_dataset(tokenizer_name: str):
-    poj_dataset = datasets.load_dataset("semeru/Code-Code-CloneDetection-POJ104")
-    train_dataset = POJ104RandomTripletDataset(poj_dataset["train"], tokenizer_name)
-    valid_dataset = POJ104RandomTripletDataset(poj_dataset["validation"], tokenizer_name)
-    test_dataset_map = POJ104Dataset(poj_dataset["test"], tokenizer_name)
-    test_dataset_cls = POJ104TripletDataset(poj_dataset["test"], tokenizer_name)
-    return train_dataset, valid_dataset, test_dataset_map, test_dataset_cls
