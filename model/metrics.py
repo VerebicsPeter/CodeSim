@@ -53,7 +53,9 @@ def calculate_map_at_R(embeddings: torch.Tensor, labels, R=499):
 
 
 def calculate_map_metrics(all_embs, all_lbls):
-    return calculate_map_at_R(all_embs, all_lbls, R=499)
+    return calculate_map_at_R(
+        torch.cat(all_embs, dim=0),
+        torch.cat(all_lbls, dim=0), R=499)
 
 
 def calculate_cls_metrics(y_true, y_pred):

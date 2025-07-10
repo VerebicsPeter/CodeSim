@@ -112,11 +112,6 @@ def finetune_model(config: configs.CodeSimClassifierConfig):
     )
     model.to(DEVICE)
     
-    if torch.cuda.device_count() > 1:
-        print("Wrapping model with DataParallel for multiple GPU usage.",
-             f"Using {torch.cuda.device_count()} GPUs with DataParallel.")
-        model = nn.DataParallel(model)
-    
     # Trainer
     param_groups = get_param_groups(model, wd=config.wd_enc)
     optimizer = torch.optim.AdamW(param_groups, lr=config.lr_enc)
@@ -206,11 +201,6 @@ def finetune_model_contrastive(config: configs.CodeSimContrastiveClassifierConfi
     )
     model.to(DEVICE)
     
-    if torch.cuda.device_count() > 1:
-        print("Wrapping model with DataParallel for multiple GPU usage.",
-             f"Using {torch.cuda.device_count()} GPUs with DataParallel.")
-        model = nn.DataParallel(model)
-    
     # Trainer
     param_groups = get_param_groups(model, wd=config.wd_enc)
     optimizer = torch.optim.AdamW(param_groups, lr=config.lr_enc)
@@ -287,11 +277,6 @@ def finetune_model_on_POJ_104(config: configs.CodeSimContrastiveClassifierConfig
         dropout_rate=config.dropout_rate,
     )
     model.to(DEVICE)
-    
-    if torch.cuda.device_count() > 1:
-        print("Wrapping model with DataParallel for multiple GPU usage.",
-             f"Using {torch.cuda.device_count()} GPUs with DataParallel.")
-        model = nn.DataParallel(model)
     
     # Trainer
     param_groups = get_param_groups(model, wd=config.wd_enc)

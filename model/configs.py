@@ -23,18 +23,16 @@ CONTRASTIVE_FINETUNING_STRATEGIES = [
 
 @dataclass
 class BaseConfig:
-    # model related
+    # Model related
     pretrained_model_name: str = "huggingface/CodeBERTa-small-v1"
     pretrained_model: PreTrainedModel | None = None
     freeze_model: bool = False  # NOTE: if true the encoder model is not finetuned
     pooling_strat: PoolingStrategy = cls_pooling_strat
     # LoRA config
     lora_config: LoraConfig | None = None
-    # workers
-    num_workers: int = 0
-    # num rows to cap dataloaders
-    num_rows: int | None = None
-    # epochs and batch size
+    num_workers: int = 0  # number of workers for dataloaders
+    num_rows: int | None = None  # number of rows to cap dataloaders to
+    # Epochs and batch size
     epochs: int = 4
     bs: int = 20  # batch size
     iters_to_accumulate: int = 2
@@ -43,17 +41,26 @@ class BaseConfig:
         print(f"Pretrained checkpoint name: {self.pretrained_model_name}")
         
         if self.pretrained_model is None:
-            print("Initializing encoder model.")
+            print("Initializing pretrained model.")
             self.pretrained_model = AutoModel.from_pretrained(self.pretrained_model_name)
         
         device = self.pretrained_model.device
         
         if self.lora_config is not None:
-            print("Wrapping encoder model with LoRA config for parameter efficient finetuning.")
+            print("Wrapping pretrained model with LoRA config for parameter efficient finetuning.")
             self.pretrained_model = get_peft_model(self.pretrained_model, self.lora_config)
             # Ensure the model is on the correct device
-            self.pretrained_model.device = device
-            
+            if not hasattr(self.pretrained_model, "device"): self.pretrained_model.device = device
+        
+        device_count = torch.cuda.device_count()
+        #NOTE: Only wrap the pretrained model with DataParallel like this, not the entire model.
+        # If the entire model is wrapped, the loss function will not work correctly.
+        if device_count > 1:
+            print("Wrapping pretrained model with DataParallel for multiple GPU usage.",
+                  f"[{device_count} GPUs]")
+            self.pretrained_model = nn.DataParallel(self.pretrained_model)
+            if not hasattr(self.pretrained_model, "device"): self.pretrained_model.device = device
+
 
 @dataclass
 class CodeSimClassifierConfig(BaseConfig):
