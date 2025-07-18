@@ -1,7 +1,5 @@
 # Dataset wrappers for CodeNet data
 from tqdm import tqdm
-import pandas as pd
-import pprint as pp
 import random
 import datasets
 from transformers import default_data_collator
@@ -10,57 +8,11 @@ from torch.utils.data import Dataset, DataLoader, Sampler, Subset
 from collections import defaultdict
 from functools import partial
 
-# NOTE: Therse are old datasets
-__DATASET_URL_SMALL = "https://drive.google.com/uc?export=download&id=1hZ4_QjTcmesQYsPo75G1lyIe__HFfwbG"
-__DATASET_URL_LARGE = "https://drive.google.com/uc?export=download&id=10ok2e2BmWRVhn_V6tRBZzLfeYQ0eaJA2"
-__OLD_DATASET_URLS = {
-    "paired" : "https://drive.google.com/uc?export=download&id=1pUErbyZw1fBC5gIe6KT7BWga7h6Bfr4l",
-    "triplet": "https://drive.google.com/uc?export=download&id=11aBIxIMEMKoGyJ9IdUHY2XQv1ZzfyXd2",
-    # NOTE: These have scheme "problem_id,submission_id,status,code",
-    # NOTE: To reproduce original splits: random_state=42, split group via iloc with ratios 0.8, 0.1, 0.1
-    "small": __DATASET_URL_SMALL,
-    "large": __DATASET_URL_LARGE,
-}
+from model import configs
 
 
 def tokenize_fn(tokenizer, tokenizer_args, examples):
     return tokenizer(examples["code"], **tokenizer_args)
-
-
-def custom_collate_triplet(batch):
-    A, P, NS = [], [], []
-    for a,p,ns in batch:
-        A.append(a)
-        P.append(p)
-        NS.extend(ns)
-    encsA = default_data_collator(A)
-    encsP = default_data_collator(P)
-    encsNS = default_data_collator(NS) 
-    return encsA, encsP, encsNS
-
-
-def custom_collate_POJpair(batch):
-    A, P = [], []
-    for a,p in batch:
-        A.append(a)
-        P.append(p)
-    encsA = default_data_collator(A)
-    encsP = default_data_collator(P)
-    # Hacky dummy encoding for negative placeholder
-    encs_dummy = {k: torch.zeros(0, v.shape[-1], dtype=v.dtype) for k, v in encsA.items()}
-    return encsA, encsP, encs_dummy
-
-
-def get_loaders(train_data, valid_data, test_data, bs, shuffle, num_workers=4, num_rows=None):
-    if num_rows is not None:
-        print(f"Limiting dataset to {num_rows} rows.")
-        train_data = Subset(train_data, range(num_rows))
-        valid_data = Subset(valid_data, range(num_rows))
-        test_data  = Subset(test_data , range(num_rows))
-    train_loader = DataLoader(train_data, batch_size=bs, shuffle=shuffle, num_workers=num_workers)
-    valid_loader = DataLoader(valid_data, batch_size=bs, shuffle=False, num_workers=num_workers)
-    test_loader  = DataLoader(test_data , batch_size=bs, shuffle=False, num_workers=num_workers)
-    return train_loader, valid_loader, test_loader
 
 
 def init_problem_indices(hf_dataset):
@@ -281,17 +233,18 @@ def Create_CodeNet_triplet_dataset(
 def Create_POJ104_triplet_dataset(
     tokenizer,
     tokenizer_args,
+    data_path="semeru/Code-Code-CloneDetection-POJ104",
     sample_negative=False,
 ):
     tokenize = partial(tokenize_fn, tokenizer, tokenizer_args)
-    poj_dataset = datasets.load_dataset("semeru/Code-Code-CloneDetection-POJ104").map(tokenize, batched=True)
-    poj_dataset.set_format(type="torch", columns=["input_ids", "attention_mask"], output_all_columns=True)
+    dataset = datasets.load_dataset(data_path).map(tokenize, batched=True)
+    dataset.set_format(type="torch", columns=["input_ids", "attention_mask"], output_all_columns=True)
     
-    train_ds = POJ104RandomTripletDataset(poj_dataset["train"],
+    train_ds = POJ104RandomTripletDataset(dataset["train"],
                                           sample_negative=sample_negative)
-    valid_ds = POJ104Dataset(poj_dataset["validation"],
+    valid_ds = POJ104Dataset(dataset["validation"],
                              tokenizer, tokenizer_args)
-    test_ds  = POJ104Dataset(poj_dataset["test"],
+    test_ds  = POJ104Dataset(dataset["test"],
                              tokenizer, tokenizer_args)
     return train_ds, valid_ds, test_ds
 
@@ -319,3 +272,88 @@ class RandomTripletBatchSampler(Sampler):
 
     def __len__(self):
         return self.num_batches
+
+
+def custom_collate_triplet(batch):
+    A, P, NS = [], [], []
+    for a,p,ns in batch:
+        A.append(a)
+        P.append(p)
+        NS.extend(ns)
+    encsA = default_data_collator(A)
+    encsP = default_data_collator(P)
+    encsNS = default_data_collator(NS) 
+    return encsA, encsP, encsNS
+
+
+def custom_collate_POJpair(batch):
+    A, P = [], []
+    for a,p in batch:
+        A.append(a)
+        P.append(p)
+    encsA = default_data_collator(A)
+    encsP = default_data_collator(P)
+    # Hacky dummy encoding for negative placeholder
+    encs_dummy = {k: torch.zeros(0, v.shape[-1], dtype=v.dtype) for k, v in encsA.items()}
+    return encsA, encsP, encs_dummy
+
+
+def get_loaders(train_data, valid_data, test_data, bs, shuffle, num_workers=4, num_rows=None):
+    if num_rows is not None:
+        print(f"Limiting dataset to {num_rows} rows.")
+        train_data = Subset(train_data, range(num_rows))
+        valid_data = Subset(valid_data, range(num_rows))
+        test_data = Subset(test_data, range(num_rows))
+    
+    train_loader = DataLoader(train_data, batch_size=bs, shuffle=shuffle, num_workers=num_workers)
+    valid_loader = DataLoader(valid_data, batch_size=bs, shuffle=False, num_workers=num_workers)
+    test_loader = DataLoader(test_data, batch_size=bs, shuffle=False, num_workers=num_workers)
+    return train_loader, valid_loader, test_loader
+
+
+def get_CodeNet_loaders(
+    train_data: CodeNetRandomTripletDataset,
+    valid_data: CodeNetRandomTripletDataset,  # TODO: Change to CodeNetTripletDataset
+    test_data : CodeNetTripletDataset,
+    config: configs.CodeSimContrastiveClassifierConfig
+):
+    train_loader = DataLoader(
+        train_data, 
+        batch_sampler=RandomTripletBatchSampler(
+            pids=train_data.problem_ids,
+            num_batches=config.num_batches,
+            num_pids_per_batch=config.bs
+        ),
+        collate_fn=custom_collate_triplet
+    )
+    valid_loader = DataLoader(
+        valid_data,
+        batch_size=config.bs,
+        sampler=DefaultTripletSampler(valid_data.problem_ids),
+        collate_fn=custom_collate_triplet
+    )
+    test_loader = DataLoader(
+        test_data,
+        batch_size=config.bs
+    )
+    return train_loader, valid_loader, test_loader
+
+
+def get_POJ104_loaders(
+    train_data: POJ104RandomTripletDataset, 
+    valid_data: POJ104Dataset, 
+    test_data : POJ104Dataset, 
+    config: configs.CodeSimContrastiveClassifierConfig
+):
+    train_loader = DataLoader(
+        train_data,
+        batch_sampler=RandomTripletBatchSampler(
+            pids=train_data.problem_ids,
+            num_batches=config.num_batches,
+            num_pids_per_batch=config.bs
+        ),
+        collate_fn=custom_collate_POJpair
+    )
+    valid_loader = DataLoader(valid_data, batch_size=config.bs, shuffle=False)
+    test_loader = DataLoader(test_data, batch_size=config.bs, shuffle=False)
+    return train_loader, valid_loader, test_loader

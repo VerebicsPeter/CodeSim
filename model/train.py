@@ -1,6 +1,3 @@
-# TODO: Parametrize data path
-# TODO: Implement data aggregator and compute metrics hooks
-
 from tqdm import tqdm
 from functools import partial
 
@@ -16,11 +13,11 @@ from model.code_sim_models import (
     CodeSimLinearClassifierCross,
     CodeSimLinearClassifierSBert,
     CodeSimContrastiveEncoder,
-    CodeSimilarityTrainer,
+    CodeSimTrainer,
     defaultdict,
-    aggr_data_classifier,
-    aggr_data_contrastive_cls,
-    aggr_data_contrastive_map,
+    aggr_data_classifier, aggr_hook_classifier,
+    aggr_data_contrastive_cls, aggr_hook_contrastive_cls,
+    aggr_data_contrastive_map, aggr_hook_contrastive_map,
 )
 import model.code_sim_models as code_sim_models
 import model.code_sim_datasets as code_sim_datasets
@@ -33,8 +30,21 @@ from model.utils import set_seed
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 NO_DECAY = ['bias', 'LayerNorm.weight']
 
+# Cosine Distance
+distance_function = lambda x, y: 1 - F.cosine_similarity(x, y)
 
-def get_param_groups(model, wd):
+
+def get_tokenizer_args(max_length = None) -> dict:
+    args = {
+        "return_tensors": "pt",
+        "truncation": True,
+        "padding": "max_length",
+    }
+    if max_length: args["max_length"] = max_length
+    return args
+
+
+def get_param_groups(model: nn.Module, wd):
     param_groups = [
         {
             'params': [p for n, p in model.named_parameters() if any(nd in n for nd in NO_DECAY)],
@@ -47,6 +57,12 @@ def get_param_groups(model, wd):
     ]
     print("No decay:", NO_DECAY)
     return param_groups
+
+
+def get_optimizer(model: nn.Module, lr, wd):
+    param_groups = get_param_groups(model, wd=wd)
+    optimizer = torch.optim.AdamW(param_groups, lr=lr)
+    return optimizer
 
 
 def get_scheduler(loader, optimizer, epochs, iters_to_accumulate, warmup=0.1):
@@ -65,12 +81,15 @@ def get_scheduler(loader, optimizer, epochs, iters_to_accumulate, warmup=0.1):
     return scheduler
 
 
-def finetune_model(config: configs.CodeSimClassifierConfig):
+def finetune_classifier_model(
+    config: configs.CodeSimClassifierConfig,
+    data_path="peterverebics/CodeNet_Python_118"
+):
     config.init_model()
     
     if config.finetuning_strategy not in configs.FINETUNING_STRATEGIES:
         raise ValueError(f"Invalid finetuning strategy: {config.finetuning_strategy}.")
-    elif config.finetuning_strategy == "binary_cls_simpl":
+    elif config.finetuning_strategy == "binary_cls_cross":
         model_cls = code_sim_models.CodeSimLinearClassifierCross
         loss_func = nn.BCEWithLogitsLoss()
         loss_hook = code_sim_models.compute_loss_logit_Cross
@@ -80,18 +99,14 @@ def finetune_model(config: configs.CodeSimClassifierConfig):
         loss_hook = code_sim_models.compute_loss_logit_SBert
 
     # NOTE: strategy specifies encoding scheme
-    return_single_encoding = config.finetuning_strategy == "binary_cls_simpl"
+    return_single_encoding = config.finetuning_strategy == "binary_cls_cross"
+    
     # Dataset Creation
     tokenizer = AutoTokenizer.from_pretrained(config.pretrained_model_name)
-    tokenizer_args={
-        "return_tensors": "pt",
-        "padding": "max_length", "max_length": 512 if return_single_encoding else 256,
-        "truncation": True,
-    }
+    tokenizer_args=get_tokenizer_args(512 if return_single_encoding else 256)
     
     train_data, valid_data, test_data = code_sim_datasets.Create_CodeNet_paired_dataset(
-        tokenizer=tokenizer,
-        tokenizer_args=tokenizer_args,
+        tokenizer, tokenizer_args, data_path=data_path,
         return_single_encoding=return_single_encoding,
     )
     
@@ -113,34 +128,32 @@ def finetune_model(config: configs.CodeSimClassifierConfig):
     model.to(DEVICE)
     
     # Trainer
-    param_groups = get_param_groups(model, wd=config.wd_enc)
-    optimizer = torch.optim.AdamW(param_groups, lr=config.lr_enc)
+    optimizer = get_optimizer(model, config.lr_enc, config.wd_enc)
     scheduler = get_scheduler(train_loader, optimizer, config.epochs, config.iters_to_accumulate)
-    
-    trainer = CodeSimilarityTrainer(
+    trainer = CodeSimTrainer(
         model,
         (train_loader, valid_loader),
         loss_func=loss_func,
         loss_hook=loss_hook,
-        aggr_hook=aggr_data_classifier,
+        aggr_hook=aggr_hook_classifier,
         compute_metrics=metrics.calculate_cls_metrics,
         target_metrics=["F1", "roc_auc"],
         optimizer=optimizer,
         scheduler=scheduler,
         device=DEVICE,
-        
     )
     trainer.train(epochs=config.epochs, iters_to_accumulate=config.iters_to_accumulate)
     
     print("Evaluating.")
-    y_true, y_pred = eval_model_classifier(eval_data=test_loader, model=model)
+    y_true, y_pred = eval_classifier_model(eval_data=test_loader, model=model)
     print_reports(y_true, y_pred)
 
 
-def finetune_model_contrastive(config: configs.CodeSimContrastiveClassifierConfig):
+def finetune_contrastive_model_on_CodeNet(
+    config: configs.CodeSimContrastiveClassifierConfig,
+    data_path="peterverebics/CodeNet_Python_118"
+):
     config.init_model()
-    
-    distance_function = lambda x, y: 1 - F.cosine_similarity(x, y)  # cosine distance
     
     if config.finetuning_strategy not in configs.CONTRASTIVE_FINETUNING_STRATEGIES:
         raise ValueError(f"Invalid finetuning strategy: {config.finetuning_strategy}.")
@@ -150,47 +163,24 @@ def finetune_model_contrastive(config: configs.CodeSimContrastiveClassifierConfi
     elif config.finetuning_strategy == "info_nce_loss":
         # TODO: implement InfoNCE loss as a custom loss function
         loss_func = None
-        loss_hook = lambda trainer, batched_data: code_sim_models.compute_loss_tuplet(
-            trainer, batched_data, config.temp
-        )
+        loss_hook = partial(code_sim_models.compute_loss_tuplet, temp=config.temp)
     elif config.finetuning_strategy == "combined_loss":
         # TODO: implement combined loss as a custom loss function
         loss_func = nn.TripletMarginWithDistanceLoss(distance_function=distance_function, margin=config.margin)
-        loss_hook = lambda trainer, batched_data: code_sim_models.compute_loss_combined(
-            trainer, batched_data, config.temp, config.w_1, config.w_2
-        )
+        loss_hook = partial(code_sim_models.compute_loss_combined, temp=config.temp, w_1=config.w_1, w_2=config.w_2)
     
     # Dataset Creation
     tokenizer=AutoTokenizer.from_pretrained(config.pretrained_model_name)
-    tokenizer_args = {
-        "return_tensors": "pt",
-        "padding": "max_length", "max_length": 256,
-        "truncation": True,
-    }
+    tokenizer_args = get_tokenizer_args(256)
     
     train_data, valid_data, test_data = code_sim_datasets.Create_CodeNet_triplet_dataset(
-        tokenizer=tokenizer,
-        tokenizer_args=tokenizer_args,
+        tokenizer, tokenizer_args, data_path=data_path,
         num_negatives=config.num_negatives
     )
     
-    train_loader = DataLoader(
-        train_data, 
-        batch_sampler=code_sim_datasets.RandomTripletBatchSampler(
-            pids=train_data.problem_ids,
-            num_batches=config.num_batches,
-            num_pids_per_batch=config.bs
-        ),
-        collate_fn=code_sim_datasets.custom_collate_triplet
+    train_loader, valid_loader, test_loader = code_sim_datasets.get_CodeNet_loaders(
+        train_data, valid_data, test_data, config
     )
-    
-    valid_loader = DataLoader(
-        valid_data, batch_size=config.bs,
-        sampler=code_sim_datasets.DefaultTripletSampler(valid_data.problem_ids),
-        collate_fn=code_sim_datasets.custom_collate_triplet
-    )
-    
-    test_loader = DataLoader(test_data, batch_size=config.bs)
 
     # Model Creation
     model = CodeSimContrastiveEncoder(
@@ -202,19 +192,16 @@ def finetune_model_contrastive(config: configs.CodeSimContrastiveClassifierConfi
     model.to(DEVICE)
     
     # Trainer
-    param_groups = get_param_groups(model, wd=config.wd_enc)
-    optimizer = torch.optim.AdamW(param_groups, lr=config.lr_enc)
+    optimizer = get_optimizer(model, config.lr_enc, config.wd_enc)
     scheduler = get_scheduler(train_loader, optimizer, config.epochs, config.iters_to_accumulate)
-    
-    trainer = CodeSimilarityTrainer(
+    trainer = CodeSimTrainer(
         model,
         (train_loader, valid_loader),
         loss_func=loss_func,
         loss_hook=loss_hook,
-        aggr_hook=aggr_data_contrastive_cls,
+        aggr_hook=aggr_hook_contrastive_cls,
         compute_metrics=metrics.calculate_cls_metrics,
         target_metrics=["F1", "roc_auc"],
-        loss_checkpointing=True,
         optimizer=optimizer,
         scheduler=scheduler,
         device=DEVICE,
@@ -222,14 +209,15 @@ def finetune_model_contrastive(config: configs.CodeSimContrastiveClassifierConfi
     trainer.train(epochs=config.epochs, iters_to_accumulate=config.iters_to_accumulate)
     
     print("Evaluating.")
-    y_true, y_pred = eval_model_contrastive_cls(eval_data=test_loader, model=trainer.model)
+    y_true, y_pred = eval_contrastive_model_cls(eval_data=test_loader, model=trainer.model)
     print_reports(y_true, y_pred)
 
 
-def finetune_model_on_POJ_104(config: configs.CodeSimContrastiveClassifierConfig):
+def finetune_contrastive_model_on_POJ_104(
+    config: configs.CodeSimContrastiveClassifierConfig,
+    data_path="semeru/Code-Code-CloneDetection-POJ104"
+):
     config.init_model()
-    
-    distance_function = lambda x, y: 1 - F.cosine_similarity(x, y)  # cosine distance
     
     if config.finetuning_strategy not in configs.CONTRASTIVE_FINETUNING_STRATEGIES:
         raise ValueError(f"Invalid finetuning strategy for POJ: {config.finetuning_strategy}")
@@ -245,29 +233,16 @@ def finetune_model_on_POJ_104(config: configs.CodeSimContrastiveClassifierConfig
     
     # Dataset Creation
     tokenizer = AutoTokenizer.from_pretrained(config.pretrained_model_name)
-    tokenizer_args = {
-        "return_tensors": "pt",
-        "padding": "max_length",
-        "truncation": True,
-    }
+    tokenizer_args = get_tokenizer_args()
     
     train_data, valid_data, test_data = code_sim_datasets.Create_POJ104_triplet_dataset(
-        tokenizer=tokenizer,
-        tokenizer_args=tokenizer_args,
+        tokenizer, tokenizer_args, data_path=data_path,
         sample_negative=config.finetuning_strategy == "triplet_loss",
     )
     
-    train_loader = DataLoader(
-        train_data,
-        batch_sampler=code_sim_datasets.RandomTripletBatchSampler(
-            pids=train_data.problem_ids,
-            num_batches=config.num_batches,
-            num_pids_per_batch=config.bs
-        ),
-        collate_fn=code_sim_datasets.custom_collate_POJpair
+    train_loader, valid_loader, test_loader = code_sim_datasets.get_POJ104_loaders(
+        train_data, valid_data, test_data, config
     )
-    valid_loader = DataLoader(valid_data, batch_size=config.bs, shuffle=False)
-    test_loader = DataLoader(test_data, batch_size=config.bs, shuffle=False)
     
     # Model Creation
     model = CodeSimContrastiveEncoder(
@@ -279,16 +254,14 @@ def finetune_model_on_POJ_104(config: configs.CodeSimContrastiveClassifierConfig
     model.to(DEVICE)
     
     # Trainer
-    param_groups = get_param_groups(model, wd=config.wd_enc)
-    optimizer = torch.optim.AdamW(param_groups, lr=config.lr_enc)
+    optimizer = get_optimizer(model, config.lr_enc, config.wd_enc)
     scheduler = get_scheduler(train_loader, optimizer, config.epochs, config.iters_to_accumulate)
-    
-    trainer = CodeSimilarityTrainer(
+    trainer = CodeSimTrainer(
         model,
         (train_loader, valid_loader),
         loss_func=loss_func,
         loss_hook=loss_hook,
-        aggr_hook=aggr_data_contrastive_map,
+        aggr_hook=aggr_hook_contrastive_map,
         compute_metrics=metrics.calculate_map_metrics,
         target_metrics=["map_r"],
         loss_checkpointing=False,
@@ -299,14 +272,12 @@ def finetune_model_on_POJ_104(config: configs.CodeSimContrastiveClassifierConfig
     trainer.train(epochs=config.epochs, iters_to_accumulate=config.iters_to_accumulate)
     
     print("Evaluating.")
-    result = eval_model_contrastive_map(eval_data=test_loader, model=trainer.model)
+    result = eval_contrastive_model_map(eval_data=test_loader, model=trainer.model)
     print(result)
 
 
-def eval(model: CodeSimContrastiveEncoder 
-              | CodeSimLinearClassifierCross 
-              | CodeSimLinearClassifierSBert,
-         num_rows=5000):
+def eval(model: CodeSimContrastiveEncoder | CodeSimLinearClassifierCross | CodeSimLinearClassifierSBert,
+         data_path="peterverebics/CodeNet_Python_118", num_rows=None):
     set_seed(42)
     model.to(DEVICE)
     
@@ -315,37 +286,28 @@ def eval(model: CodeSimContrastiveEncoder
     if isinstance(model, CodeSimLinearClassifierCross):
         dataset = code_sim_datasets.Create_CodeNet_paired_dataset(
             tokenizer=tokenizer,
-            tokenizer_args={
-                "return_tensors": "pt",
-                "padding": "max_length", "max_length": 512,
-                "truncation": True,
-            },
+            tokenizer_args=get_tokenizer_args(512),
+            data_path=data_path,
             return_single_encoding=True,
         )
-        eval_func = eval_model_classifier
+        eval_func = eval_classifier_model
     elif isinstance(model, CodeSimLinearClassifierSBert):
         dataset = code_sim_datasets.Create_CodeNet_paired_dataset(
             tokenizer=tokenizer,
-            tokenizer_args={
-                "return_tensors": "pt",
-                "padding": "max_length", "max_length": 256,
-                "truncation": True,
-            },
+            tokenizer_args=get_tokenizer_args(256),
+            data_path=data_path,
             return_single_encoding=False,
         )
-        eval_func = eval_model_classifier
+        eval_func = eval_classifier_model
     elif isinstance(model, CodeSimContrastiveEncoder):
         print("Evaluating ", model.enc_model.name_or_path)
         dataset = code_sim_datasets.Create_CodeNet_triplet_dataset(
             tokenizer=tokenizer,
-            tokenizer_args={
-                "return_tensors": "pt",
-                "padding": "max_length", "max_length": 256,
-                "truncation": True,
-            },
+            tokenizer_args=get_tokenizer_args(256),
+            data_path=data_path,
             num_negatives=1,
         )
-        eval_func = eval_model_contrastive_cls
+        eval_func = eval_contrastive_model_cls
     else:
         raise ValueError(f"Invalid model type. {model.__class__.__name__}")
 
@@ -357,33 +319,33 @@ def eval(model: CodeSimContrastiveEncoder
 
 
 @torch.no_grad
-def eval_model_classifier(eval_data: DataLoader, model: CodeSimLinearClassifierCross | CodeSimLinearClassifierSBert):
+def eval_classifier_model(eval_data: DataLoader, model: CodeSimLinearClassifierCross | CodeSimLinearClassifierSBert):
     model.eval()
     aggr_data = defaultdict(list)
     for data in tqdm(eval_data):
-        aggr_data_classifier(model, data, aggr_data)
+        aggr_data_classifier(model, data, aggr_data, DEVICE)
     y_true = aggr_data['y_true']
     y_pred = aggr_data['y_pred']
     return y_true, y_pred
 
 
 @torch.no_grad
-def eval_model_contrastive_cls(eval_data: DataLoader, model: CodeSimContrastiveEncoder):
+def eval_contrastive_model_cls(eval_data: DataLoader, model: CodeSimContrastiveEncoder):
     model.eval()
     aggr_data = defaultdict(list)
     for data in tqdm(eval_data):
-        aggr_data_contrastive_cls(model, data, aggr_data)
+        aggr_data_contrastive_cls(model, data, aggr_data, DEVICE)
     y_true = aggr_data['y_true']
     y_pred = aggr_data['y_pred']
     return y_true, y_pred
 
 
 @torch.no_grad
-def eval_model_contrastive_map(eval_data: DataLoader, model: CodeSimContrastiveEncoder):
+def eval_contrastive_model_map(eval_data: DataLoader, model: CodeSimContrastiveEncoder):
     model.eval()
     aggr_data = defaultdict(list)
     for data in tqdm(eval_data):
-        aggr_data_contrastive_map(model, data, aggr_data)
+        aggr_data_contrastive_map(model, data, aggr_data, DEVICE)
     all_embs = torch.cat(aggr_data["all_embs"], dim=0)
     all_lbls = torch.cat(aggr_data["all_lbls"], dim=0)
     result = metrics.calculate_map_at_R(all_embs, all_lbls, R=499)

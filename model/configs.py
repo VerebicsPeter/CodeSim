@@ -44,22 +44,18 @@ class BaseConfig:
             print("Initializing pretrained model.")
             self.pretrained_model = AutoModel.from_pretrained(self.pretrained_model_name)
         
-        device = self.pretrained_model.device
-        
         if self.lora_config is not None:
             print("Wrapping pretrained model with LoRA config for parameter efficient finetuning.")
             self.pretrained_model = get_peft_model(self.pretrained_model, self.lora_config)
-            # Ensure the model is on the correct device
-            if not hasattr(self.pretrained_model, "device"): self.pretrained_model.device = device
         
         device_count = torch.cuda.device_count()
-        #NOTE: Only wrap the pretrained model with DataParallel like this, not the entire model.
+        # NOTE:
+        # Only wrap the pretrained model with DataParallel like this, not the entire model.
         # If the entire model is wrapped, the loss function will not work correctly.
         if device_count > 1:
             print("Wrapping pretrained model with DataParallel for multiple GPU usage.",
                   f"[{device_count} GPUs]")
             self.pretrained_model = nn.DataParallel(self.pretrained_model)
-            if not hasattr(self.pretrained_model, "device"): self.pretrained_model.device = device
 
 
 @dataclass

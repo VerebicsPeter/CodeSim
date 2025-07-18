@@ -1,5 +1,4 @@
 import numpy as np
-import copy
 
 # PyTorch
 import torch
@@ -7,170 +6,19 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.amp import autocast, GradScaler
 from torch.utils.data import DataLoader
-#from pytorch_metric_learning import losses
 
 # Hugging Face Transformers
 import transformers
-from transformers import AutoTokenizer, BatchEncoding
+from transformers import BatchEncoding
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling
 
 from tqdm.auto import tqdm
 
 from collections import defaultdict
-from typing import Callable, Protocol, Tuple
-
-"""
-NOTE: Pooling strategy returns a pooled output based on the output of a transformer, this could be the:
- - `pooler_output` which is the embedding of the CLS token in BERT models,
- - a mean pooled version of the last hidden states
- - a max  pooled version of the last hidden states
- - an attention pooled version of the last hidden states
-"""
-# TODO: RNN (GRU) based pooling strategy
-PoolingStrategy = Callable[[BaseModelOutputWithPooling | torch.Tensor, torch.Tensor], torch.Tensor]
+from typing import Callable, Tuple
 
 
-def cls_pooling_strat(output: BaseModelOutputWithPooling, *_):
-    return output.pooler_output
-
-
-def max_pooling_strat(output: BaseModelOutputWithPooling, mask: torch.Tensor):
-    pooled_output = output.last_hidden_state * mask.unsqueeze(-1)  # mask out irrelevant embeddings
-    return pooled_output.max(dim=1).values
-
-
-def mean_pooling_strat(output: BaseModelOutputWithPooling, mask: torch.Tensor):
-    pooled_output = output.last_hidden_state * mask.unsqueeze(-1)  # mask out irrelevant embeddings
-    return pooled_output.mean(dim=1)
-
-
-def qwen3_pooling_strat(output: BaseModelOutput, mask: torch.Tensor):
-    left_padding = (mask[:, -1].sum() == mask.shape[0])
-    last_hidden_state = output.last_hidden_state
-    if left_padding:
-        return last_hidden_state[:, -1]
-    else:
-        sequence_lengths = mask.sum(dim=1) - 1
-        batch_size = last_hidden_state.shape[0]
-        return last_hidden_state[torch.arange(batch_size, device=last_hidden_state.device), sequence_lengths]
-
-
-class AttentionPooler(nn.Module):
-    def __init__(self, bert_dim, attn_dim):
-        super().__init__()
-        # TODO: maybe initialize linear layers with uniform weights
-        self.attention = nn.Sequential(
-            nn.Linear(bert_dim,
-                      attn_dim),
-            nn.Tanh(),
-            nn.Linear(attn_dim, 1)
-        )
-    
-    def forward(self, output: BaseModelOutputWithPooling, mask: torch.Tensor):
-        # get attention scores using learnable weights
-        attn_scores = self.attention(output.last_hidden_state).squeeze(-1)
-        # mask attention scores with '-inf', softmax turns them to 0...
-        attn_scores = attn_scores.masked_fill(mask==0, float("-inf"))
-        attn_weights = F.softmax(attn_scores, dim=1).unsqueeze(-1)
-        # Return the weighted representation
-        return (output.last_hidden_state * attn_weights).sum(dim=1)
-
-
-def freeze_model(model: nn.Module):
-    for param in model.parameters(): param.requires_grad = False
-
-
-def put_batch_encoding_to_device(encoding: BatchEncoding, device):
-    for k, v in encoding.items(): encoding[k] = v.to(device)
-
-
-def get_tokenizer(model: transformers.PreTrainedModel) -> transformers.PreTrainedTokenizerBase:
-    if (not model.name_or_path): raise ValueError("Model's name or path is not known.")
-    return AutoTokenizer.from_pretrained(model.name_or_path)
-
-
-class Trainer(Protocol):
-    # Returns train and validation losses in a tuple
-    def train(self, epochs: int, **kwargs) -> Tuple: ...
-
-
-class CodeSimLinearClassifierCross(nn.Module):
-    def __init__(
-        self,
-        enc_model: transformers.PreTrainedModel,
-        freeze_enc_model=False,
-        dropout_rate=0.2,
-        pooling_strat: PoolingStrategy = cls_pooling_strat
-    ):
-        super().__init__()
-        if freeze_enc_model: freeze_model(enc_model)
-        self.enc_model = enc_model
-        self.pooling_strat = pooling_strat
-        self.drop = nn.Dropout(dropout_rate)
-        self.cls = nn.Linear(self.enc_model.config.hidden_size, 1)
-
-    def forward(self, inputs: BatchEncoding) -> torch.Tensor:
-        mask = inputs['attention_mask']
-        output: BaseModelOutputWithPooling = self.enc_model(**inputs)
-        pooled_output = self.pooling_strat(output, mask)
-        logits = self.cls(self.drop(pooled_output))
-        return logits
-
-
-class CodeSimLinearClassifierSBert(nn.Module):
-    def __init__(
-        self, 
-        enc_model: transformers.PreTrainedModel,
-        freeze_enc_model=False,
-        dropout_rate=0.2,
-        pooling_strat: PoolingStrategy = cls_pooling_strat,
-    ):
-        super().__init__()
-        if freeze_enc_model: freeze_model(enc_model)
-        self.enc_model = enc_model
-        self.pooling_strat = pooling_strat
-        self.drop = nn.Dropout(dropout_rate)
-        self.cls = nn.Linear(3 * enc_model.config.hidden_size, 1)  # weights for concatenated [ u, v, |u - v| ]
-    
-    def forward(self, enc_u: BatchEncoding, enc_v: BatchEncoding) -> torch.Tensor:
-        mask_u = enc_u['attention_mask']
-        mask_v = enc_v['attention_mask']
-        # Pass through BERT
-        u = self.enc_model(**enc_u)
-        v = self.enc_model(**enc_v)
-        # Pool the BERT output
-        pooled_u = self.pooling_strat(u, mask_u)
-        pooled_v = self.pooling_strat(v, mask_v)
-        # Construct the feature vector [ u, v, |u - v| ]
-        h = torch.cat([pooled_u, pooled_v, torch.abs(pooled_u - pooled_v)], dim=1)
-        # Classification layer
-        logits = self.cls(self.drop(h))
-        return logits
-
-
-class CodeSimContrastiveEncoder(nn.Module):
-    def __init__(
-        self,
-        enc_model: transformers.PreTrainedModel,
-        freeze_enc_model=False,
-        dropout_rate=0.2,
-        pooling_strat: PoolingStrategy = cls_pooling_strat
-    ):
-        super().__init__()
-        if freeze_enc_model: freeze_model(enc_model)
-        self.enc_model = enc_model
-        self.enc_tokenizer = None
-        self.pooling_strat = pooling_strat
-        self.drop = nn.Dropout(dropout_rate)
-
-    def forward(self, inputs: BatchEncoding) -> torch.Tensor:
-        mask = inputs['attention_mask']
-        output: BaseModelOutputWithPooling = self.enc_model(**inputs)
-        pooled_output = self.drop(self.pooling_strat(output, mask))
-        return pooled_output
-
-
-class CodeSimilarityTrainer(Trainer):
+class CodeSimTrainer:
     def __init__(
         self,
         model: nn.Module,
@@ -269,7 +117,7 @@ class CodeSimilarityTrainer(Trainer):
                 loss = self.loss_hook(self, data)
                 sum_loss += loss.item()
             if self.target_metrics:
-                _ = self.aggr_hook(self.model, data, aggr_data)
+                aggr = self.aggr_hook(self, data, aggr_data)
         
         if self.target_metrics:
             metrics = self.compute_metrics(**aggr_data)
@@ -330,7 +178,148 @@ class CodeSimilarityTrainer(Trainer):
         return train_losses, valid_losses
 
 
-def compute_loss_logit_Cross(trainer: CodeSimilarityTrainer, batched_data):
+"""
+NOTE: Pooling strategy returns a pooled output based on the output of a transformer, this could be the:
+ - `pooler_output` which is the embedding of the CLS token in BERT models,
+ - a mean pooled version of the last hidden states
+ - a max  pooled version of the last hidden states
+ - an attention pooled version of the last hidden states
+"""
+# TODO: RNN (GRU) based pooling strategy
+PoolingStrategy = Callable[[BaseModelOutputWithPooling | torch.Tensor, torch.Tensor], torch.Tensor]
+
+
+def cls_pooling_strat(output: BaseModelOutputWithPooling, *_):
+    return output.pooler_output
+
+
+def max_pooling_strat(output: BaseModelOutputWithPooling, mask: torch.Tensor):
+    pooled_output = output.last_hidden_state * mask.unsqueeze(-1)  # mask out irrelevant embeddings
+    return pooled_output.max(dim=1).values
+
+
+def mean_pooling_strat(output: BaseModelOutputWithPooling, mask: torch.Tensor):
+    pooled_output = output.last_hidden_state * mask.unsqueeze(-1)  # mask out irrelevant embeddings
+    return pooled_output.mean(dim=1)
+
+
+def qwen3_pooling_strat(output: BaseModelOutput, mask: torch.Tensor):
+    left_padding = (mask[:, -1].sum() == mask.shape[0])
+    last_hidden_state = output.last_hidden_state
+    if left_padding:
+        return last_hidden_state[:, -1]
+    else:
+        sequence_lengths = mask.sum(dim=1) - 1
+        batch_size = last_hidden_state.shape[0]
+        return last_hidden_state[torch.arange(batch_size, device=last_hidden_state.device), sequence_lengths]
+
+
+class AttentionPooler(nn.Module):
+    def __init__(self, bert_dim, attn_dim):
+        super().__init__()
+        # TODO: maybe initialize linear layers with uniform weights
+        self.attention = nn.Sequential(
+            nn.Linear(bert_dim,
+                      attn_dim),
+            nn.Tanh(),
+            nn.Linear(attn_dim, 1)
+        )
+    
+    def forward(self, output: BaseModelOutputWithPooling, mask: torch.Tensor):
+        # get attention scores using learnable weights
+        attn_scores = self.attention(output.last_hidden_state).squeeze(-1)
+        # mask attention scores with '-inf', softmax turns them to 0...
+        attn_scores = attn_scores.masked_fill(mask==0, float("-inf"))
+        attn_weights = F.softmax(attn_scores, dim=1).unsqueeze(-1)
+        # Return the weighted representation
+        return (output.last_hidden_state * attn_weights).sum(dim=1)
+
+
+def freeze_model(model: nn.Module):
+    for param in model.parameters(): param.requires_grad = False
+
+
+def put_batch_encoding_to_device(encoding: BatchEncoding, device):
+    for k, v in encoding.items(): encoding[k] = v.to(device)
+
+
+class CodeSimLinearClassifierCross(nn.Module):
+    def __init__(
+        self,
+        enc_model: transformers.PreTrainedModel,
+        freeze_enc_model=False,
+        dropout_rate=0.2,
+        pooling_strat: PoolingStrategy = cls_pooling_strat
+    ):
+        super().__init__()
+        if freeze_enc_model: freeze_model(enc_model)
+        self.enc_model = enc_model
+        self.pooling_strat = pooling_strat
+        self.drop = nn.Dropout(dropout_rate)
+        self.cls = nn.Linear(self.enc_model.config.hidden_size, 1)
+
+    def forward(self, inputs: BatchEncoding) -> torch.Tensor:
+        mask = inputs['attention_mask']
+        output: BaseModelOutputWithPooling = self.enc_model(**inputs)
+        pooled_output = self.pooling_strat(output, mask)
+        logits = self.cls(self.drop(pooled_output))
+        return logits
+
+
+class CodeSimLinearClassifierSBert(nn.Module):
+    def __init__(
+        self, 
+        enc_model: transformers.PreTrainedModel,
+        freeze_enc_model=False,
+        dropout_rate=0.2,
+        pooling_strat: PoolingStrategy = cls_pooling_strat,
+    ):
+        super().__init__()
+        if freeze_enc_model: freeze_model(enc_model)
+        self.enc_model = enc_model
+        self.pooling_strat = pooling_strat
+        self.drop = nn.Dropout(dropout_rate)
+        self.cls = nn.Linear(3 * enc_model.config.hidden_size, 1)  # weights for concatenated [ u, v, |u - v| ]
+    
+    def forward(self, enc_u: BatchEncoding, enc_v: BatchEncoding) -> torch.Tensor:
+        mask_u = enc_u['attention_mask']
+        mask_v = enc_v['attention_mask']
+        # Pass through BERT
+        u = self.enc_model(**enc_u)
+        v = self.enc_model(**enc_v)
+        # Pool the BERT output
+        pooled_u = self.pooling_strat(u, mask_u)
+        pooled_v = self.pooling_strat(v, mask_v)
+        # Construct the feature vector [ u, v, |u - v| ]
+        h = torch.cat([pooled_u, pooled_v, torch.abs(pooled_u - pooled_v)], dim=1)
+        # Classification layer
+        logits = self.cls(self.drop(h))
+        return logits
+
+
+class CodeSimContrastiveEncoder(nn.Module):
+    def __init__(
+        self,
+        enc_model: transformers.PreTrainedModel,
+        freeze_enc_model=False,
+        dropout_rate=0.2,
+        pooling_strat: PoolingStrategy = cls_pooling_strat
+    ):
+        super().__init__()
+        if freeze_enc_model: freeze_model(enc_model)
+        self.enc_model = enc_model
+        self.enc_tokenizer = None
+        self.pooling_strat = pooling_strat
+        self.drop = nn.Dropout(dropout_rate)
+
+    def forward(self, inputs: BatchEncoding) -> torch.Tensor:
+        mask = inputs['attention_mask']
+        output: BaseModelOutputWithPooling = self.enc_model(**inputs)
+        pooled_output = self.drop(self.pooling_strat(output, mask))
+        return pooled_output
+
+
+def compute_loss_logit_Cross(trainer: CodeSimTrainer, batched_data):
     """Loss strategy for fine tuning BERT."""
     encoding, labels = batched_data
     # Converting to cuda tensors if needed
@@ -344,7 +333,7 @@ def compute_loss_logit_Cross(trainer: CodeSimilarityTrainer, batched_data):
     return loss
 
 
-def compute_loss_logit_SBert(trainer: CodeSimilarityTrainer, batched_data):
+def compute_loss_logit_SBert(trainer: CodeSimTrainer, batched_data):
     """Loss strategy for finetuning BERT."""
     encoding_u, encoding_v, labels = batched_data
     # Converting to cuda tensors if needed
@@ -359,7 +348,7 @@ def compute_loss_logit_SBert(trainer: CodeSimilarityTrainer, batched_data):
     return loss
 
 
-def compute_loss_triplet(trainer: CodeSimilarityTrainer, batched_data):
+def compute_loss_triplet(trainer: CodeSimTrainer, batched_data):
     """Loss strategy for finetuning BERT."""
     encs_a, encs_p, encs_n = batched_data
     N = encs_a["input_ids"].shape[0]  # batch size
@@ -372,7 +361,7 @@ def compute_loss_triplet(trainer: CodeSimilarityTrainer, batched_data):
 
 
 # TODO: Make temp a learnable parameter!
-def compute_loss_tuplet(trainer: CodeSimilarityTrainer, batched_data, temp=0.05):
+def compute_loss_tuplet(trainer: CodeSimTrainer, batched_data, temp=0.05):
     """
     Loss strategy for finetuning BERT.
 
@@ -411,7 +400,7 @@ def compute_loss_tuplet(trainer: CodeSimilarityTrainer, batched_data, temp=0.05)
 
 # TODO: Make temp a learnable parameter!
 def compute_loss_combined(
-    trainer: CodeSimilarityTrainer, batched_data,
+    trainer: CodeSimTrainer, batched_data,
     temp=0.05,
     w_1=1.0,
     w_2=1.0,
@@ -439,15 +428,16 @@ def compute_loss_combined(
 # TODO: Combined loss function for contrastive and classification objectives
 
 
-def aggr_data_classifier(model: CodeSimLinearClassifierCross | CodeSimLinearClassifierSBert, data, aggr_data: defaultdict[str, list]):
+def aggr_data_classifier(model: CodeSimLinearClassifierCross | CodeSimLinearClassifierSBert,
+                         data, aggr_data: defaultdict[str, list], device):
     if isinstance(model, CodeSimLinearClassifierCross):
         encs, labels = data
-        put_batch_encoding_to_device(encs, model.enc_model.device)
+        put_batch_encoding_to_device(encs, device)
         logits = model.forward(encs)
-    else:
+    elif isinstance(model, CodeSimLinearClassifierSBert):
         encs_u, encs_v, labels = data
-        put_batch_encoding_to_device(encs_u, model.enc_model.device)
-        put_batch_encoding_to_device(encs_v, model.enc_model.device)
+        put_batch_encoding_to_device(encs_u, device)
+        put_batch_encoding_to_device(encs_v, device)
         logits = model.forward(encs_u, encs_v)
     preds = torch.sigmoid(logits.squeeze(-1))
     # Store predictions and labels
@@ -455,12 +445,13 @@ def aggr_data_classifier(model: CodeSimLinearClassifierCross | CodeSimLinearClas
     aggr_data["y_pred"].extend(preds .cpu().tolist())
 
 
-def aggr_data_contrastive_cls(model: CodeSimContrastiveEncoder, data, aggr_data: defaultdict[str, list]):
+def aggr_data_contrastive_cls(model: CodeSimContrastiveEncoder,
+                              data, aggr_data: defaultdict[str, list], device):
     encs_a, encs_p, encs_n = data
     batch_size = encs_a["input_ids"].shape[0]
     # Combine the inputs into single encoding
     inputs = {key: torch.cat([encs_a[key], encs_p[key], encs_n[key]]) for key in encs_a}
-    put_batch_encoding_to_device(inputs, model.enc_model.device)
+    put_batch_encoding_to_device(inputs, device)
     outputs = model.forward(inputs)
     embs_a, embs_p, embs_n = outputs.split(batch_size)
     # Calculate the pairwise cosine similarities
@@ -475,9 +466,26 @@ def aggr_data_contrastive_cls(model: CodeSimContrastiveEncoder, data, aggr_data:
     aggr_data['y_pred'].extend(preds_n)
 
 
-def aggr_data_contrastive_map(model: CodeSimContrastiveEncoder, data, aggr_data: defaultdict[str, list]):
+def aggr_data_contrastive_map(model: CodeSimContrastiveEncoder,
+                              data, aggr_data: defaultdict[str, list], device):
     encs, lbls = data
-    put_batch_encoding_to_device(encs, model.enc_model.device)
+    put_batch_encoding_to_device(encs, device)
     embs = model.forward(encs)
     aggr_data["all_embs"].append(embs.detach().cpu())
     aggr_data["all_lbls"].append(lbls.detach().cpu())
+
+
+def aggr_hook_classifier(
+    trainer: CodeSimTrainer, data, aggr_data: defaultdict[str, list]
+):
+    aggr_data_classifier(trainer.model, data, aggr_data, trainer.device)
+
+def aggr_hook_contrastive_cls(
+    trainer: CodeSimTrainer, data, aggr_data: defaultdict[str, list]
+):
+    aggr_data_contrastive_cls(trainer.model, data, aggr_data, trainer.device)
+
+def aggr_hook_contrastive_map(
+    trainer: CodeSimTrainer, data, aggr_data: defaultdict[str, list]
+):
+    aggr_data_contrastive_map(trainer.model, data, aggr_data, trainer.device)
