@@ -133,7 +133,7 @@ def app_tab():
 
 def opt_tab():
     with gr.Tab("Options"):
-        gr.Markdown("## Load Models")
+        gr.Markdown("## Options")
         dropdown = gr.Dropdown(
             choices=[
                 "CodeBERTa base",

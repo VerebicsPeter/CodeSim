@@ -89,6 +89,7 @@ class CodeNetTripletDataset(Dataset):
         
         self.triplet_idxs = []
         rng = random.Random(random_state)
+        # TODO/FIXME: some splits may not have 100 examples per problem id!
         N = num_triplets_per_problem
         for pid in self.problem_ids:
             pos_idxs = rng.sample(self.problem_id_to_passing_idxs[pid], 2*N)

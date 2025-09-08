@@ -1,5 +1,4 @@
 from tqdm import tqdm
-from functools import partial
 
 import torch
 import torch.nn as nn
@@ -14,10 +13,15 @@ from model.code_sim_models import (
     CodeSimLinearClassifierSBert,
     CodeSimContrastiveEncoder,
     CodeSimTrainer,
+    ContrastiveLoss,
     defaultdict,
-    aggr_data_classifier, aggr_hook_classifier,
-    aggr_data_contrastive_cls, aggr_hook_contrastive_cls,
-    aggr_data_contrastive_map, aggr_hook_contrastive_map,
+    EvalDataWrapper,
+    pass_data_classifier,
+    aggr_data_classifier,
+    embd_data_contrastive_cls,
+    aggr_data_contrastive_cls,
+    embd_data_contrastive_map,
+    aggr_data_contrastive_map,
 )
 import model.code_sim_models as code_sim_models
 import model.code_sim_datasets as code_sim_datasets
@@ -130,14 +134,38 @@ def finetune_classifier_model(
     # Trainer
     optimizer = get_optimizer(model, config.lr_enc, config.wd_enc)
     scheduler = get_scheduler(train_loader, optimizer, config.epochs, config.iters_to_accumulate)
+    
+    def aggr_data_loss(data, aggr_data: defaultdict[str, list]):
+        aggr_data["losses"].append(loss_func(data[0].squeeze(-1), data[1].float()).item())
+    
     trainer = CodeSimTrainer(
         model,
-        (train_loader, valid_loader),
+        train_loader=train_loader,
+        valid_loader_wrappers=(
+            EvalDataWrapper(
+                valid_loader,
+                data_embedder=pass_data_classifier,
+                aggr_hooks={
+                    "loss":
+                        aggr_data_loss,
+                    "F1":
+                        aggr_data_classifier,
+                    "roc_auc":
+                        aggr_data_classifier,
+                },
+                metr_hooks={
+                    "loss":
+                        lambda **kwargs: sum(kwargs["losses"])/len(kwargs["losses"]),
+                    "F1":
+                        lambda **kwargs: metrics.calculate_cls_metrics(**kwargs)["F1"],
+                    "roc_auc":
+                        lambda **kwargs: metrics.calculate_cls_metrics(**kwargs)["roc_auc"],
+                },
+            ),
+        ),
         loss_func=loss_func,
         loss_hook=loss_hook,
-        aggr_hook=aggr_hook_classifier,
-        compute_metrics=metrics.calculate_cls_metrics,
-        target_metrics=["F1", "roc_auc"],
+        target_metrics=["loss", "F1", "roc_auc"],
         optimizer=optimizer,
         scheduler=scheduler,
         device=DEVICE,
@@ -161,13 +189,14 @@ def finetune_contrastive_model_on_CodeNet(
         loss_func = nn.TripletMarginWithDistanceLoss(distance_function=distance_function, margin=config.margin)
         loss_hook = code_sim_models.compute_loss_triplet
     elif config.finetuning_strategy == "info_nce_loss":
-        # TODO: implement InfoNCE loss as a custom loss function
-        loss_func = None
-        loss_hook = partial(code_sim_models.compute_loss_tuplet, temp=config.temp)
+        loss_func = ContrastiveLoss(temp=config.temp)
+        loss_hook = code_sim_models.compute_loss_tuplet
     elif config.finetuning_strategy == "combined_loss":
-        # TODO: implement combined loss as a custom loss function
-        loss_func = nn.TripletMarginWithDistanceLoss(distance_function=distance_function, margin=config.margin)
-        loss_hook = partial(code_sim_models.compute_loss_combined, temp=config.temp, w_1=config.w_1, w_2=config.w_2)
+        local_loss_func = nn.TripletMarginWithDistanceLoss(distance_function=distance_function, margin=config.margin)
+        loss_func = ContrastiveLoss(local_loss_func=local_loss_func,
+                                    temp=config.temp, w_1=config.w_1, w_2=config.w_2)
+        
+        loss_hook = code_sim_models.compute_loss_combined
     
     # Dataset Creation
     tokenizer=AutoTokenizer.from_pretrained(config.pretrained_model_name)
@@ -194,14 +223,38 @@ def finetune_contrastive_model_on_CodeNet(
     # Trainer
     optimizer = get_optimizer(model, config.lr_enc, config.wd_enc)
     scheduler = get_scheduler(train_loader, optimizer, config.epochs, config.iters_to_accumulate)
+    
+    def aggr_data_loss(data, aggr_data: defaultdict[str, list]):
+        aggr_data["losses"].append(loss_func(*data).item())
+        
     trainer = CodeSimTrainer(
         model,
-        (train_loader, valid_loader),
+        train_loader=train_loader,
+        valid_loader_wrappers=(
+            EvalDataWrapper(
+                valid_loader,
+                data_embedder=embd_data_contrastive_cls,
+                aggr_hooks={
+                    "loss":
+                        aggr_data_loss,
+                    "F1":
+                        aggr_data_contrastive_cls,
+                    "roc_auc":
+                        aggr_data_contrastive_cls,
+                },
+                metr_hooks={
+                    "loss":
+                        lambda **kwargs: sum(kwargs["losses"])/len(kwargs["losses"]),
+                    "F1":
+                        lambda **kwargs: metrics.calculate_cls_metrics(**kwargs)["F1"],
+                    "roc_auc":
+                        lambda **kwargs: metrics.calculate_cls_metrics(**kwargs)["roc_auc"],
+                },
+            ),
+        ),
         loss_func=loss_func,
         loss_hook=loss_hook,
-        aggr_hook=aggr_hook_contrastive_cls,
-        compute_metrics=metrics.calculate_cls_metrics,
-        target_metrics=["F1", "roc_auc"],
+        target_metrics=["loss", "F1", "roc_auc"],
         optimizer=optimizer,
         scheduler=scheduler,
         device=DEVICE,
@@ -227,9 +280,8 @@ def finetune_contrastive_model_on_POJ_104(
         loss_func = nn.TripletMarginWithDistanceLoss(distance_function=distance_function, margin=config.margin)
         loss_hook = code_sim_models.compute_loss_triplet
     elif config.finetuning_strategy == "info_nce_loss":
-        # TODO: implement InfoNCE loss as a custom loss function
-        loss_func = None
-        loss_hook = partial(code_sim_models.compute_loss_tuplet, temp=config.temp)
+        loss_func = ContrastiveLoss(temp=config.temp)
+        loss_hook = code_sim_models.compute_loss_tuplet
     
     # Dataset Creation
     tokenizer = AutoTokenizer.from_pretrained(config.pretrained_model_name)
@@ -256,13 +308,33 @@ def finetune_contrastive_model_on_POJ_104(
     # Trainer
     optimizer = get_optimizer(model, config.lr_enc, config.wd_enc)
     scheduler = get_scheduler(train_loader, optimizer, config.epochs, config.iters_to_accumulate)
+    
+    def aggr_data_loss(data, aggr_data: defaultdict[str, list]):
+        aggr_data["losses"].append(loss_func(*data).item())
+    
     trainer = CodeSimTrainer(
         model,
-        (train_loader, valid_loader),
+        train_loader=train_loader,
+        valid_loader_wrappers=(
+            EvalDataWrapper(
+                valid_loader,
+                data_embedder=embd_data_contrastive_map,
+                aggr_hooks={
+                    "loss":
+                        aggr_data_loss,
+                    "map_r":
+                        aggr_data_contrastive_map,
+                },
+                metr_hooks={
+                    "loss":
+                        lambda **kwargs: sum(kwargs["losses"])/len(kwargs["losses"]),
+                    "map_r":
+                        lambda **kwargs: metrics.calculate_map_metrics(**kwargs)["map_r"],
+                },
+            ),
+        ),
         loss_func=loss_func,
         loss_hook=loss_hook,
-        aggr_hook=aggr_hook_contrastive_map,
-        compute_metrics=metrics.calculate_map_metrics,
         target_metrics=["map_r"],
         loss_checkpointing=False,
         optimizer=optimizer,
@@ -323,7 +395,8 @@ def eval_classifier_model(eval_data: DataLoader, model: CodeSimLinearClassifierC
     model.eval()
     aggr_data = defaultdict(list)
     for data in tqdm(eval_data):
-        aggr_data_classifier(model, data, aggr_data, DEVICE)
+        data = pass_data_classifier(data, model, DEVICE)
+        aggr_data_classifier(data, aggr_data)
     y_true = aggr_data['y_true']
     y_pred = aggr_data['y_pred']
     return y_true, y_pred
@@ -334,7 +407,8 @@ def eval_contrastive_model_cls(eval_data: DataLoader, model: CodeSimContrastiveE
     model.eval()
     aggr_data = defaultdict(list)
     for data in tqdm(eval_data):
-        aggr_data_contrastive_cls(model, data, aggr_data, DEVICE)
+        emb_data = embd_data_contrastive_cls(data, model, DEVICE)
+        aggr_data_contrastive_cls(emb_data, aggr_data)
     y_true = aggr_data['y_true']
     y_pred = aggr_data['y_pred']
     return y_true, y_pred
@@ -345,7 +419,8 @@ def eval_contrastive_model_map(eval_data: DataLoader, model: CodeSimContrastiveE
     model.eval()
     aggr_data = defaultdict(list)
     for data in tqdm(eval_data):
-        aggr_data_contrastive_map(model, data, aggr_data, DEVICE)
+        emb_data = embd_data_contrastive_map(data, model, DEVICE)
+        aggr_data_contrastive_map(emb_data, aggr_data)
     all_embs = torch.cat(aggr_data["all_embs"], dim=0)
     all_lbls = torch.cat(aggr_data["all_lbls"], dim=0)
     result = metrics.calculate_map_at_R(all_embs, all_lbls, R=499)

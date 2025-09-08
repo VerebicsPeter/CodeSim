@@ -15,28 +15,69 @@ from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPo
 from tqdm.auto import tqdm
 
 from collections import defaultdict
-from typing import Callable, Tuple
+from typing import Any, Callable
+
+
+class EvalDataWrapper:
+    def __init__(self, data_loader: DataLoader,
+                 data_embedder: Callable[[Any, nn.Module, torch.device],Any],
+                 aggr_hooks: dict[str, Callable[[Any, defaultdict],None]],
+                 metr_hooks: dict[str, Callable],
+                 ):
+        self.data_loader = data_loader
+        self.data_embedder = data_embedder
+        assert aggr_hooks.keys() == metr_hooks.keys(), "Hooks must have matching keys!"
+        self.metrics = metr_hooks.keys()
+        self.aggr_hooks = aggr_hooks
+        self.metr_hooks = metr_hooks
+        
+    
+    def embed_data(self, model: nn.Module, device: torch.device) -> list:
+        embedded_batches = []
+        for data in tqdm(self.data_loader):
+            embedded_batch = self.data_embedder(data, model, device)
+            embedded_batches.append(embedded_batch)
+        # NOTE: return the embedded data of batches
+        return embedded_batches
+
+    def calc_mertics(self, embedded_batches):
+        aggr_data = {
+            metric: defaultdict(list)
+            for metric in self.metrics 
+        }
+        for embedded_batch in embedded_batches:
+            for metric in self.metrics:
+                self.aggr_hooks[metric](embedded_batch, aggr_data[metric])
+        metr_data = {
+            metric: 
+                self.metr_hooks[metric](**aggr_data[metric])
+            for metric in self.metrics
+        }
+        return metr_data
 
 
 class CodeSimTrainer:
     def __init__(
         self,
         model: nn.Module,
-        loaders: Tuple[DataLoader, DataLoader],
+        train_loader: DataLoader,
+        valid_loader_wrappers: tuple[EvalDataWrapper],
+        target_metrics: list[str],
         loss_func: Callable,
         loss_hook: Callable,
         optimizer,
         scheduler,
         device: torch.device,
-        loss_checkpointing: bool = True,  # Whether to save the best model based on validation loss
-        target_metrics: list[str] | None = None,
-        aggr_hook: Callable | None = None,
-        compute_metrics: Callable[[],dict[str,]] | None = None,
     ):
         self.model = model
-        assert len(loaders) == 2, "Please provide the training and validation loaders!"
-        self.train_loader = loaders[0]
-        self.valid_loader = loaders[1]
+        self.train_loader = train_loader
+        assert len(valid_loader_wrappers) >= 1,\
+        "ERROR: Please provide at least one validation loader!"
+        self.valid_loader_wrappers = valid_loader_wrappers
+        ls = valid_loader_wrappers
+        assert any(metric in l.metrics for l in ls for metric in target_metrics),\
+        "ERROR: Please provide at least one validation metric!"
+        self.target_metrics = target_metrics
         
         self.loss_func = loss_func
         self.loss_hook = loss_hook
@@ -45,11 +86,6 @@ class CodeSimTrainer:
         self.scheduler = scheduler
         self.device = device
         self.scaler = GradScaler(self.device)
-        
-        self.loss_checkpointing = loss_checkpointing
-        self.target_metrics = target_metrics
-        self.aggr_hook = aggr_hook
-        self.compute_metrics = compute_metrics
     
     def train_step(self, iters_to_accumulate: int, print_every: int):
         """Train one epoch."""
@@ -101,41 +137,21 @@ class CodeSimTrainer:
         # Set the model to evaluation mode
         self.model.eval()
         
-        aggr_data = defaultdict(list)
-        
-        sum_loss = 0.0
-        num_iter = len(self.valid_loader)
-        if not num_iter:
-            raise ValueError("Loader is empty, please check the dataset and dataloader.")
-        
-        if self.target_metrics:
-            assert self.aggr_hook is not None,\
-            f"Metrics calculation requires a data aggregator hook function."
-        
-        for data in tqdm(self.valid_loader):
-            if self.loss_checkpointing:
-                loss = self.loss_hook(self, data)
-                sum_loss += loss.item()
-            if self.target_metrics:
-                aggr = self.aggr_hook(self, data, aggr_data)
-        
-        if self.target_metrics:
-            metrics = self.compute_metrics(**aggr_data)
-            assert set(metrics.keys()) == set(self.target_metrics),\
-            f"Metrics computed do not match the target metrics: {self.target_metrics}"
+        for valid_loader_wrapper in self.valid_loader_wrappers:
+            num_iter = len(valid_loader_wrapper.data_loader)
+            if not num_iter:
+                raise ValueError("Loader is empty, please check the dataset and dataloader.")
+            embeddings = valid_loader_wrapper.embed_data(self.model, self.device)
+            metrics = valid_loader_wrapper.calc_mertics(embeddings)
         else:
-            metrics = {}
-            
-        if self.loss_checkpointing:
-            avg_loss = sum_loss / num_iter
-        else:
-            avg_loss = np.inf
+            metrics = metrics if metrics else {}
         
-        return avg_loss, metrics
+        return metrics
 
     
     def train(self, epochs: int, iters_to_accumulate: int = 2):
         # Path to save the best model to
+        LOSS_METRIC = "loss"
         BEST_MODEL_PATH_EVAL = "best_model_by_eval.pt"
         BEST_MODEL_PATH_LOSS = "best_model_by_loss.pt"
         LAST_MODEL_PATH = "last_model.pt"
@@ -150,20 +166,19 @@ class CodeSimTrainer:
         for epoch in range(epochs):
             print(f'EPOCH {epoch + 1}/{epochs}')
             train_loss = self.train_step(iters_to_accumulate, print_every)
-            valid_loss, valid_metrics = self.valid_step()
-            print(f"EPOCH {epoch + 1}/{epochs} complete.\n"
-                  f" AVG train loss: {train_loss}\n"
-                  f" AVG valid loss: {valid_loss}\n"
-                  f" METRICS: {valid_metrics}")
+            valid_metr = self.valid_step()
+            print(f"EPOCH {epoch + 1}/{epochs} complete. AVG train loss: {train_loss}\n"
+                  f" METRICS: {valid_metr}")
             
+            valid_loss = valid_metr.get(LOSS_METRIC, np.inf)
             if valid_loss < best_loss:
                 print(f"Best validation loss improved from {best_loss} to {valid_loss}.")
                 best_loss = valid_loss
                 torch.save(self.model.state_dict(), BEST_MODEL_PATH_LOSS)
             
-            improved_metrics = any(valid_metrics.get(m, -np.inf) > best_metrics[m]
-                                   for m in self.target_metrics)
-            if improved_metrics:
+            valid_metrics = {k:v for k,v in valid_metr.items() if k != LOSS_METRIC}
+            if (any(valid_metrics.get(m, -np.inf) > best_metrics[m]
+                for m in self.target_metrics)):
                 print(f"Best metrics improved.")
                 for m in self.target_metrics:
                     best_metrics[m] = max(valid_metrics.get(m, -np.inf), best_metrics[m])
@@ -319,6 +334,65 @@ class CodeSimContrastiveEncoder(nn.Module):
         return pooled_output
 
 
+# TODO: Make temp a learnable parameter
+class ContrastiveLoss(torch.nn.Module):
+    def __init__(self, local_loss_func=None, w1=1.0, w2=1.0, temp=0.07, device=None):
+        """
+        Args:
+            local_loss_func: function (A, POS, NEG) -> scalar tensor
+            w1 (float): weight for global cross-entropy loss
+            w2 (float): weight for local loss
+            temp (float): temperature scaling for similarity
+            device (torch.device or None): device for labels
+        """
+        super().__init__()
+        self.local_loss_func = local_loss_func
+        self.w1 = w1
+        self.w2 = w2
+        self.temp = temp
+        self.device = device
+
+    def forward(self, anchor, pos, neg):
+        """
+        Given N DIFFERENT classes with
+        
+        `a,p,n` examples for each class (`a,p` positive and `n` negative)
+        
+        Computes the loss on the embeddings of examples as follows:
+        1. Concatenate the embeddings of `p`, `n` examples (`C`).
+        2. Compute the cosine similarities between the anchors and `C`.
+        3. Scale the cosine similarities by `temp` to obtain logits.
+        4. Compute the cross-entropy loss between the logits and labels.
+        
+        NOTE:  
+        This **requires** the batched tuplets to be from **different problems**.  
+        If the some tuplets are from the same problem then labels are incorrect.
+        """
+        # L2 normalize embeddings for cosine similarity
+        anchor = F.normalize(anchor, dim=1)
+        pos = F.normalize(pos, dim=1)
+        neg = F.normalize(neg, dim=1)
+
+        N = anchor.size(0)
+
+        # Concatenate positives and negatives as candidates
+        C = torch.cat([pos, neg], dim=0)     # shape: (2N, d)
+
+        # Similarity logits (cosine similarity / temperature)
+        logits = (anchor @ C.T) / self.temp  # shape: (N, 2N)
+
+        # Ground-truth labels: each A should match its POS
+        labels = torch.arange(N, device=anchor.device if self.device is None else self.device)
+
+        # Global cross-entropy loss
+        loss_1 = F.cross_entropy(logits, labels)
+
+        # Local loss from provided function
+        loss_2 = self.local_loss_func(anchor, pos, neg) if self.local_loss_func else 0
+
+        return self.w1 * loss_1 + self.w2 * loss_2
+
+
 def compute_loss_logit_Cross(trainer: CodeSimTrainer, batched_data):
     """Loss strategy for fine tuning BERT."""
     encoding, labels = batched_data
@@ -360,24 +434,9 @@ def compute_loss_triplet(trainer: CodeSimTrainer, batched_data):
     return trainer.loss_func(embs_a, embs_p, embs_n)
 
 
-# TODO: Make temp a learnable parameter!
-def compute_loss_tuplet(trainer: CodeSimTrainer, batched_data, temp=0.05):
+def compute_loss_tuplet(trainer: CodeSimTrainer, batched_data):
     """
     Loss strategy for finetuning BERT.
-
-    Given N DIFFERENT problems in CodeNet with
-    
-    `a,p,n` solutions for each problem (`a,p` passing and `n` failing)
-    
-    Computes the loss on the embeddings of solutions as follows:
-    1. Concatenate the embeddings of `p`, `n` solutions (`Q`).
-    2. Compute the cosine similarities between the anchors and `Q`.
-    3. Scale the cosine similarities by `temp` to obtain logits.
-    4. Compute the cross-entropy loss between the logits and labels.
-    
-    NOTE:  
-    This **requires** the batched tuplets to be from **different problems**.  
-    If the some tuplets are from the same problem then labels are incorrect.
     """
     
     enc_a, enc_p, encs_n = batched_data
@@ -387,24 +446,12 @@ def compute_loss_tuplet(trainer: CodeSimTrainer, batched_data, temp=0.05):
     put_batch_encoding_to_device(inputs, trainer.device)
     
     embs = trainer.model(inputs)
-    embs = F.normalize(embs, dim=1)  # normalize to align with cosine similarity
     
     A, POS, NEG = embs.split((N, N, embs.size(0)-2*N))
-    Q = torch.cat([POS, NEG], dim=0)
-    
-    logits = A @ Q.T / temp
-    labels = torch.arange(N, device=trainer.device)
-    
-    return F.cross_entropy(logits, labels)
+    return trainer.loss_func(A, POS, NEG)
 
 
-# TODO: Make temp a learnable parameter!
-def compute_loss_combined(
-    trainer: CodeSimTrainer, batched_data,
-    temp=0.05,
-    w_1=1.0,
-    w_2=1.0,
-):  
+def compute_loss_combined(trainer: CodeSimTrainer, batched_data):  
     enc_a, enc_p, encs_n = batched_data
     N = enc_a["input_ids"].shape[0]  # batch size
     inputs = { key: torch.cat([enc_a[key], enc_p[key], encs_n[key]]) for key in enc_a }
@@ -412,41 +459,36 @@ def compute_loss_combined(
     put_batch_encoding_to_device(inputs, trainer.device)
     
     embs = trainer.model(inputs)
-    embs = F.normalize(embs, dim=1)  # normalize to align with cosine similarity
     
     A, POS, NEG = embs.split(N)
-    Q = torch.cat([POS, NEG], dim=0)
-    
-    logits = A @ Q.T / temp
-    labels = torch.arange(N, device=trainer.device)
-    
-    loss_1 = F.cross_entropy(logits, labels)
-    loss_2 = trainer.loss_func(A, POS, NEG)  # Local loss
-    return w_1 * loss_1 + w_2 * loss_2
+    return trainer.loss_func(A, POS, NEG)
 
 
 # TODO: Combined loss function for contrastive and classification objectives
 
 
-def aggr_data_classifier(model: CodeSimLinearClassifierCross | CodeSimLinearClassifierSBert,
-                         data, aggr_data: defaultdict[str, list], device):
+def pass_data_classifier(data, model: CodeSimLinearClassifierCross | CodeSimLinearClassifierSBert, device):
+    if not isinstance(model, (CodeSimLinearClassifierCross, CodeSimLinearClassifierSBert)):
+        raise ValueError(f"Invalid model type {type(model)}")
     if isinstance(model, CodeSimLinearClassifierCross):
         encs, labels = data
         put_batch_encoding_to_device(encs, device)
         logits = model.forward(encs)
-    elif isinstance(model, CodeSimLinearClassifierSBert):
+    if isinstance(model, CodeSimLinearClassifierSBert):
         encs_u, encs_v, labels = data
         put_batch_encoding_to_device(encs_u, device)
         put_batch_encoding_to_device(encs_v, device)
         logits = model.forward(encs_u, encs_v)
-    preds = torch.sigmoid(logits.squeeze(-1))
-    # Store predictions and labels
+    return logits, labels
+
+def aggr_data_classifier(data, aggr_data: defaultdict[str, list]):
+    logits, labels = data
+    preds_ = torch.sigmoid(logits.squeeze(-1))
     aggr_data["y_true"].extend(labels.cpu().tolist())
-    aggr_data["y_pred"].extend(preds .cpu().tolist())
+    aggr_data["y_pred"].extend(preds_.cpu().tolist())
 
 
-def aggr_data_contrastive_cls(model: CodeSimContrastiveEncoder,
-                              data, aggr_data: defaultdict[str, list], device):
+def embd_data_contrastive_cls(data, model: CodeSimContrastiveEncoder, device: torch.device):
     encs_a, encs_p, encs_n = data
     batch_size = encs_a["input_ids"].shape[0]
     # Combine the inputs into single encoding
@@ -454,6 +496,10 @@ def aggr_data_contrastive_cls(model: CodeSimContrastiveEncoder,
     put_batch_encoding_to_device(inputs, device)
     outputs = model.forward(inputs)
     embs_a, embs_p, embs_n = outputs.split(batch_size)
+    return embs_a, embs_p, embs_n
+
+def aggr_data_contrastive_cls(data, aggr_data: defaultdict[str, list]):
+    embs_a, embs_p, embs_n = data
     # Calculate the pairwise cosine similarities
     dst_p = F.cosine_similarity(embs_a, embs_p, dim=1)
     dst_n = F.cosine_similarity(embs_a, embs_n, dim=1)
@@ -466,26 +512,13 @@ def aggr_data_contrastive_cls(model: CodeSimContrastiveEncoder,
     aggr_data['y_pred'].extend(preds_n)
 
 
-def aggr_data_contrastive_map(model: CodeSimContrastiveEncoder,
-                              data, aggr_data: defaultdict[str, list], device):
+def embd_data_contrastive_map(data, model: CodeSimContrastiveEncoder, device: torch.device):
     encs, lbls = data
     put_batch_encoding_to_device(encs, device)
     embs = model.forward(encs)
+    return embs, lbls
+
+def aggr_data_contrastive_map(data, aggr_data: defaultdict[str, list]):
+    embs, lbls = data
     aggr_data["all_embs"].append(embs.detach().cpu())
     aggr_data["all_lbls"].append(lbls.detach().cpu())
-
-
-def aggr_hook_classifier(
-    trainer: CodeSimTrainer, data, aggr_data: defaultdict[str, list]
-):
-    aggr_data_classifier(trainer.model, data, aggr_data, trainer.device)
-
-def aggr_hook_contrastive_cls(
-    trainer: CodeSimTrainer, data, aggr_data: defaultdict[str, list]
-):
-    aggr_data_contrastive_cls(trainer.model, data, aggr_data, trainer.device)
-
-def aggr_hook_contrastive_map(
-    trainer: CodeSimTrainer, data, aggr_data: defaultdict[str, list]
-):
-    aggr_data_contrastive_map(trainer.model, data, aggr_data, trainer.device)
