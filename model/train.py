@@ -141,7 +141,8 @@ def finetune_classifier_model(
     trainer = CodeSimTrainer(
         model,
         train_loader=train_loader,
-        valid_loader_wrappers=(
+        valid_loader_wrappers={
+            "CodeNet":
             EvalDataWrapper(
                 valid_loader,
                 data_embedder=pass_data_classifier,
@@ -162,10 +163,9 @@ def finetune_classifier_model(
                         lambda **kwargs: metrics.calculate_cls_metrics(**kwargs)["roc_auc"],
                 },
             ),
-        ),
+        },
         loss_func=loss_func,
         loss_hook=loss_hook,
-        target_metrics=["loss", "F1", "roc_auc"],
         optimizer=optimizer,
         scheduler=scheduler,
         device=DEVICE,
@@ -230,7 +230,8 @@ def finetune_contrastive_model_on_CodeNet(
     trainer = CodeSimTrainer(
         model,
         train_loader=train_loader,
-        valid_loader_wrappers=(
+        valid_loader_wrappers={
+            "CodeNet":
             EvalDataWrapper(
                 valid_loader,
                 data_embedder=embd_data_contrastive_cls,
@@ -251,10 +252,9 @@ def finetune_contrastive_model_on_CodeNet(
                         lambda **kwargs: metrics.calculate_cls_metrics(**kwargs)["roc_auc"],
                 },
             ),
-        ),
+        },
         loss_func=loss_func,
         loss_hook=loss_hook,
-        target_metrics=["loss", "F1", "roc_auc"],
         optimizer=optimizer,
         scheduler=scheduler,
         device=DEVICE,
@@ -315,7 +315,8 @@ def finetune_contrastive_model_on_POJ_104(
     trainer = CodeSimTrainer(
         model,
         train_loader=train_loader,
-        valid_loader_wrappers=(
+        valid_loader_wrappers={
+            "POJ-104":
             EvalDataWrapper(
                 valid_loader,
                 data_embedder=embd_data_contrastive_map,
@@ -332,10 +333,9 @@ def finetune_contrastive_model_on_POJ_104(
                         lambda **kwargs: metrics.calculate_map_metrics(**kwargs)["map_r"],
                 },
             ),
-        ),
+        },
         loss_func=loss_func,
         loss_hook=loss_hook,
-        target_metrics=["map_r"],
         loss_checkpointing=False,
         optimizer=optimizer,
         scheduler=scheduler,

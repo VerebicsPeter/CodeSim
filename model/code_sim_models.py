@@ -61,8 +61,7 @@ class CodeSimTrainer:
         self,
         model: nn.Module,
         train_loader: DataLoader,
-        valid_loader_wrappers: tuple[EvalDataWrapper],
-        target_metrics: list[str],
+        valid_loader_wrappers: dict[str, EvalDataWrapper],
         loss_func: Callable,
         loss_hook: Callable,
         optimizer,
@@ -75,9 +74,8 @@ class CodeSimTrainer:
         "ERROR: Please provide at least one validation loader!"
         self.valid_loader_wrappers = valid_loader_wrappers
         ls = valid_loader_wrappers
-        assert any(metric in l.metrics for l in ls for metric in target_metrics),\
+        assert sum(len(ls[name].metrics) for name in ls),\
         "ERROR: Please provide at least one validation metric!"
-        self.target_metrics = target_metrics
         
         self.loss_func = loss_func
         self.loss_hook = loss_hook
@@ -136,58 +134,72 @@ class CodeSimTrainer:
         """Evaluate the model on validation data."""
         # Set the model to evaluation mode
         self.model.eval()
+        metrics = {}
         
-        for valid_loader_wrapper in self.valid_loader_wrappers:
-            num_iter = len(valid_loader_wrapper.data_loader)
-            if not num_iter:
+        for loader_name in self.valid_loader_wrappers:
+            valid_loader_wrapper = self.valid_loader_wrappers[loader_name]
+            if not len(valid_loader_wrapper.data_loader):
                 raise ValueError("Loader is empty, please check the dataset and dataloader.")
             embeddings = valid_loader_wrapper.embed_data(self.model, self.device)
-            metrics = valid_loader_wrapper.calc_mertics(embeddings)
-        else:
-            metrics = metrics if metrics else {}
+            metrics[loader_name] = valid_loader_wrapper.calc_mertics(embeddings)
         
         return metrics
 
     
     def train(self, epochs: int, iters_to_accumulate: int = 2):
         # Path to save the best model to
-        LOSS_METRIC = "loss"
-        BEST_MODEL_PATH_EVAL = "best_model_by_eval.pt"
-        BEST_MODEL_PATH_LOSS = "best_model_by_loss.pt"
+        BEST_MODEL_PATH = "best_model.pt"
         LAST_MODEL_PATH = "last_model.pt"
         
-        best_loss = np.inf
-        best_metrics = {metric: -np.inf for metric in self.target_metrics}
+        best_metrics = {}
         
         train_losses, valid_losses = [],[]
+        metrics_history = []
+        
         # Print training loss 5 times per epoch
         print_every = len(self.train_loader) // 5
         
         for epoch in range(epochs):
             print(f'EPOCH {epoch + 1}/{epochs}')
             train_loss = self.train_step(iters_to_accumulate, print_every)
-            valid_metr = self.valid_step()
+            valid_loss = np.inf
+            valid_metrics = self.valid_step()
             print(f"EPOCH {epoch + 1}/{epochs} complete. AVG train loss: {train_loss}\n"
-                  f" METRICS: {valid_metr}")
+                  f" METRICS: {valid_metrics}")
+            metrics_history.append(valid_metrics)
             
-            valid_loss = valid_metr.get(LOSS_METRIC, np.inf)
-            if valid_loss < best_loss:
-                print(f"Best validation loss improved from {best_loss} to {valid_loss}.")
-                best_loss = valid_loss
-                torch.save(self.model.state_dict(), BEST_MODEL_PATH_LOSS)
-            
-            valid_metrics = {k:v for k,v in valid_metr.items() if k != LOSS_METRIC}
-            if (any(valid_metrics.get(m, -np.inf) > best_metrics[m]
-                for m in self.target_metrics)):
-                print(f"Best metrics improved.")
-                for m in self.target_metrics:
-                    best_metrics[m] = max(valid_metrics.get(m, -np.inf), best_metrics[m])
-                torch.save(self.model.state_dict(), BEST_MODEL_PATH_EVAL)
-            
+            for loader_name in valid_metrics:
+                metrics = valid_metrics[loader_name]
+                for metric in metrics:
+                    improved = False
+                    metric_value = metrics[metric]
+                    if (is_loss_mertic := "loss" in metric):
+                        valid_loss = metric_value
+                    if metric in best_metrics:
+                        improved = (
+                            metric_value < best_metrics[metric]
+                            if is_loss_mertic else
+                            metric_value > best_metrics[metric]
+                        )
+                    else:
+                        best_metrics[metric] = metric_value
+                        torch.save(self.model.state_dict(), BEST_MODEL_PATH)
+                    if improved:
+                        best_metrics[metric] = metric_value
+                        print(f"Best metrics improved, saving state.")
+                        torch.save(self.model.state_dict(), BEST_MODEL_PATH)
+
             torch.cuda.empty_cache()
             train_losses.append(train_loss)
             valid_losses.append(valid_loss)
+            
+        losses_history = {
+            "train": train_losses,
+            "valid": valid_losses,
+        }
         
+        torch.save(metrics_history, "metrics.pickle")
+        torch.save(losses_history, "losses.pickle")
         torch.save(self.model.state_dict(), LAST_MODEL_PATH)
         
         return train_losses, valid_losses

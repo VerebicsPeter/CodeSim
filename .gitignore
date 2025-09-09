@@ -25,5 +25,8 @@ paths.ini
 *.pt
 *_cahced/
 
+# Anything pickled
+*.pickle
+
 # Playground notebooks
 playground_*.ipynb
