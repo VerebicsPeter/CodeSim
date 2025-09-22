@@ -1,563 +1,427 @@
-import gdown
-import argparse
-import random
-import numpy as np
-import pandas as pd
-import pprint as pp
-
 from tqdm import tqdm
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import (
-    Dataset,
-    Subset,
-    DataLoader,
-    random_split,
-)
+from torch.utils.data import DataLoader
 
-from pytorch_metric_learning import losses
+from transformers import AutoTokenizer, get_linear_schedule_with_warmup
 
-from transformers import (
-    AutoTokenizer,
-    AutoModel,
-    get_linear_schedule_with_warmup,
-)
-
-from sklearn.metrics import classification_report, roc_curve
 
 from model.code_sim_models import (
-    SimilarityClassifier,
-    CodeSimLinearCLS,
-    CodeSimContrastiveCLS,
-    CodeSimSBertLinearCLS,
-    CodeSimSBertTripletCLS,
+    CodeSimLinearClassifierCross,
+    CodeSimLinearClassifierSBert,
+    CodeSimContrastiveEncoder,
+    CodeSimTrainer,
+    ContrastiveLoss,
+    defaultdict,
+    EvalDataWrapper,
+    pass_data_classifier,
+    aggr_data_classifier,
+    embd_data_contrastive_cls,
+    aggr_data_contrastive_cls,
+    embd_data_contrastive_map,
+    aggr_data_contrastive_map,
 )
 import model.code_sim_models as code_sim_models
 import model.code_sim_datasets as code_sim_datasets
+import model.configs as configs
+import model.metrics as metrics
+from model.metrics import print_reports
+from model.utils import set_seed
+
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+NO_DECAY = ['bias', 'LayerNorm.weight']
+
+# Cosine Distance
+distance_function = lambda x, y: 1 - F.cosine_similarity(x, y)
 
 
-def download_dataset(url, output_file):
-    gdown.download(url, output_file, quiet=False)
+def get_tokenizer_args(max_length = None) -> dict:
+    args = {
+        "return_tensors": "pt",
+        "truncation": True,
+        "padding": "max_length",
+    }
+    if max_length: args["max_length"] = max_length
+    return args
 
 
-FINETUNING_STRATEGIES = {
-    "linear_binary_cls",
-    "sbert_binary_cls",
-    "sbert_triplet_cls",
-}
-
-DATASET_TYPE = {
-    "paired",
-    "triplet",
-}
-
-# TODO: Maybe load URLS from a .env or something
-DATASET_URLS = {
-    "paired": "https://drive.google.com/uc?export=download&id=1pUErbyZw1fBC5gIe6KT7BWga7h6Bfr4l",
-    "triplet": "https://drive.google.com/uc?export=download&id=11aBIxIMEMKoGyJ9IdUHY2XQv1ZzfyXd2",
-    "contrastive_labeled": "https://drive.google.com/uc?export=download&id=1UteITBYXcBLt2hXviy71jQr-oXceVcs5",
-    "contrastive_unlabeled": "https://drive.google.com/uc?export=download&id=1iHHgOcJQ_qp3sk3d7w1zpWBvsgDqrPJV",
-}
+def get_param_groups(model: nn.Module, wd):
+    param_groups = [
+        {
+            'params': [p for n, p in model.named_parameters() if any(nd in n for nd in NO_DECAY)],
+            'weight_decay': 0.0
+        },
+        {
+            'params': [p for n, p in model.named_parameters() if not any(nd in n for nd in NO_DECAY)],
+            'weight_decay': wd
+        },
+    ]
+    print("No decay:", NO_DECAY)
+    return param_groups
 
 
-def set_seed(seed_value):
-    random.seed(seed_value)
-    np.random.seed(seed_value)
-    torch.manual_seed(seed_value)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed_value)
+def get_optimizer(model: nn.Module, lr, wd):
+    param_groups = get_param_groups(model, wd=wd)
+    optimizer = torch.optim.AdamW(param_groups, lr=lr)
+    return optimizer
 
 
-def test_forward_passes(pretrained_bert_name: str = "huggingface/CodeBERTa-small-v1"):
-    code = """print("Hello, World!")"""
-
-    bert_tokenizer = AutoTokenizer.from_pretrained(pretrained_bert_name)
-    bert = AutoModel.from_pretrained(pretrained_bert_name).to(DEVICE)
-
-    inputs = bert_tokenizer(code, return_tensors="pt", truncation=True, padding=True)
-    model1 = CodeSimLinearCLS(bert).to(DEVICE)
-    model2 = CodeSimSBertTripletCLS(bert).to(DEVICE)
-    model3 = CodeSimContrastiveCLS(bert).to(DEVICE)
-    model4 = CodeSimSBertLinearCLS(bert).to(DEVICE)
-
-    emb1 = model1(inputs)
-    print("Model 1 output shape:", emb1.shape)
-
-    emb2 = model2(inputs)
-    print("Model 2 output shape:", emb2.shape)
-
-    emb3 = model3(inputs)
-    print("Model 3 output shape:", emb3.shape)
-
-    emb4 = model4(inputs, inputs)
-    print("Model 4 output shape:", emb4.shape)
-
-
-def test_predict_passes(pretrained_bert_name: str = "huggingface/CodeBERTa-small-v1"):
-    code_a = """print("Hello, World!")"""
-    code_b = """def add(x,y): return x+y"""
-
-    bert = AutoModel.from_pretrained(pretrained_bert_name).to(DEVICE)
-    model1 = CodeSimLinearCLS(bert).to(DEVICE)
-    model2 = CodeSimSBertTripletCLS(bert).to(DEVICE)
-    model3 = CodeSimContrastiveCLS(bert).to(DEVICE)
-    model4 = CodeSimSBertLinearCLS(bert).to(DEVICE)
-
-    pred1 = model1.predict(code_a, code_b)
-    print("Model 1 prediction output:", pred1, "shaped", pred1.shape)
-
-    pred2 = model2.predict(code_a, code_b)
-    print("Model 2 prediction output:", pred2, "shaped", pred2.shape)
-
-    pred3 = model3.predict(code_a, code_b)
-    print("Model 3 prediction output:", pred3, "shaped", pred3.shape)
-
-    pred4 = model4.predict(code_a, code_b)
-    print("Model 4 prediction output:", pred4, "shaped", pred4.shape)
-
-
-def Create_CodeNet_paired_dataset(data_path: str, tokenizer, num_rows=5000,
-                                  return_single_encoding=True
-):
-    download_dataset(data_path, "dataset.csv")
-    df = pd.read_csv(
-        "dataset.csv", header=0,
-        names=code_sim_datasets.CodeNetPairDataset.COLUMNS
-    )
-    print("CodeNet data loaded. Data type: paired")
-    pp.pp(df)
-
-    dataset = code_sim_datasets.CodeNetPairDataset.from_pandas_df(
-        df,
-        tokenizer=tokenizer,
-        num_rows=num_rows,
-        return_single_encoding=return_single_encoding,
-    )
-    return dataset
-
-
-def Create_CodeNet_triplet_dataset(data_path: str, tokenizer, num_rows=5000):
-    download_dataset(data_path, "dataset.csv")
-    df = pd.read_csv(
-        "dataset.csv", header=0,
-        names=code_sim_datasets.CodeNetTripletDataset.COLUMNS
-    )
-    print("CodeNet data loaded. Data type: paired")
-    pp.pp(df)
-
-    dataset = code_sim_datasets.CodeNetTripletDataset.from_pandas_df(
-        df,
-        tokenizer=tokenizer,
-        num_rows=num_rows,
-    )
-    return dataset
-
-
-def train_finetuned(
-    finetuning_strategy="linear_binary_cls",
-    pretrained_bert_name: str = "huggingface/CodeBERTa-small-v1",
-    epochs=4,
-    lr=1e-5,  # Learning rate
-    wd=1e-5,  # Weight decay
-    bs=20,  # Batch size
-    # The gradient accumulation adds gradients over an effective batch of size : bs * iters_to_accumulate.
-    # If set to "1", you get the usual batch size
-    iters_to_accumulate=2,
-    # Model specific parameters
-    freeze_bert=False,  # NOTE: if true the BERT model is not finetuned
-    dropout_rate=0.2,
-    shuffle_dataloader=True,
-    num_rows=5000,
-):
-    if finetuning_strategy not in FINETUNING_STRATEGIES:
-        raise ValueError("Invalid finetuning strategy.")
-
-    if finetuning_strategy == "linear_binary_cls":
-        model_cls = code_sim_models.CodeSimLinearCLS
-        loss_func = nn.BCEWithLogitsLoss()
-        loss_hook = code_sim_models.compute_loss_logit
-        evaluator = eval_model
-
-    if finetuning_strategy == "sbert_binary_cls":
-        model_cls = code_sim_models.CodeSimSBertLinearCLS
-        loss_func = nn.BCEWithLogitsLoss()
-        loss_hook = code_sim_models.compute_loss_SBERT_logit
-        evaluator = eval_model
-
-    if finetuning_strategy == "sbert_triplet_cls":
-        model_cls = code_sim_models.CodeSimSBertTripletCLS
-        loss_func = nn.TripletMarginWithDistanceLoss(
-            distance_function=lambda x, y: 1 - F.cosine_similarity(x, y), margin=1.0
-        )
-        loss_hook = code_sim_models.compute_loss_SBERT_triplet
-        evaluator = eval_model_triplet
-
-    tokenizer = AutoTokenizer.from_pretrained(pretrained_bert_name)
-
-    if finetuning_strategy in {"linear_binary_cls", "sbert_binary_cls"}:
-        return_single_encoding = finetuning_strategy == "linear_binary_cls"
-        dataset = Create_CodeNet_paired_dataset(
-            DATASET_URLS["paired"],
-            tokenizer=tokenizer,
-            num_rows=num_rows,
-            return_single_encoding=return_single_encoding,
-        )
-    else:
-        dataset = Create_CodeNet_triplet_dataset(
-            DATASET_URLS["triplet"],
-            tokenizer=tokenizer,
-            num_rows=num_rows,
-        )
-
-    # TODO: Don't hardcode the train split ratio!
-    train_len = int(0.8 * len(dataset))
-    valid_len = len(dataset) - train_len
-    train_data, valid_data = random_split(dataset, [train_len, valid_len])
-    train_loader = DataLoader(train_data, batch_size=bs, shuffle=shuffle_dataloader)
-    valid_loader = DataLoader(valid_data, batch_size=bs, shuffle=shuffle_dataloader)
-
-    bert_model = AutoModel.from_pretrained(pretrained_bert_name).to(DEVICE)
-
-    model = model_cls(
-        bert_model,
-        freeze_bert=freeze_bert,
-        dropout_rate=dropout_rate,
-    )
-    model.to(DEVICE)
-
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
-
-    # Training and warmup steps
+def get_scheduler(loader, optimizer, epochs, iters_to_accumulate, warmup=0.1):
+    if warmup < 0 or warmup > 1:
+        raise ValueError("Warmup must be between 0 and 1!")
+    
     # NOTE: Necessary to take into account Gradient accumulation
-    num_training_steps = (epochs * len(train_loader)) // iters_to_accumulate
-    num_warmup_steps = int(num_training_steps * 0.1)  # 10% warmup
-
+    num_training_steps = (epochs * len(loader)) // iters_to_accumulate
+    num_warmup_steps = int(num_training_steps * warmup)
+    
     scheduler = get_linear_schedule_with_warmup(
         optimizer=optimizer,
-        # Necessary to take into account Gradient accumulation
         num_training_steps=num_training_steps,
-        # The number of steps for the warmup phase.
         num_warmup_steps=num_warmup_steps,
     )
+    return scheduler
 
-    trainer = code_sim_models.CodeSimilarityTrainer(
+
+def finetune_classifier_model(
+    config: configs.CodeSimClassifierConfig,
+    data_path="peterverebics/CodeNet_Python_118"
+):
+    config.init_model()
+    
+    if config.finetuning_strategy not in configs.FINETUNING_STRATEGIES:
+        raise ValueError(f"Invalid finetuning strategy: {config.finetuning_strategy}.")
+    elif config.finetuning_strategy == "binary_cls_cross":
+        model_cls = code_sim_models.CodeSimLinearClassifierCross
+        loss_func = nn.BCEWithLogitsLoss()
+        loss_hook = code_sim_models.compute_loss_logit_Cross
+    elif config.finetuning_strategy == "binary_cls_sbert":
+        model_cls = code_sim_models.CodeSimLinearClassifierSBert
+        loss_func = nn.BCEWithLogitsLoss()
+        loss_hook = code_sim_models.compute_loss_logit_SBert
+
+    # NOTE: strategy specifies encoding scheme
+    return_single_encoding = config.finetuning_strategy == "binary_cls_cross"
+    
+    # Dataset Creation
+    tokenizer = AutoTokenizer.from_pretrained(config.pretrained_model_name)
+    tokenizer_args=get_tokenizer_args(512 if return_single_encoding else 256)
+    
+    train_data, valid_data, test_data = code_sim_datasets.Create_CodeNet_paired_dataset(
+        tokenizer, tokenizer_args, data_path=data_path,
+        return_single_encoding=return_single_encoding,
+    )
+    
+    train_loader, valid_loader, test_loader = code_sim_datasets.get_loaders(
+        train_data, valid_data, test_data,
+        config.bs,
+        config.shuffle_dataloader,
+        config.num_workers,
+        config.num_rows,
+    )
+
+    # Model Creation
+    model = model_cls(
+        config.pretrained_model,
+        freeze_bert=config.freeze_model,
+        pooling_strat=config.pooling_strat,
+        dropout_rate=config.dropout_rate,
+    )
+    model.to(DEVICE)
+    
+    # Trainer
+    optimizer = get_optimizer(model, config.lr_enc, config.wd_enc)
+    scheduler = get_scheduler(train_loader, optimizer, config.epochs, config.iters_to_accumulate)
+    
+    def aggr_data_loss(data, aggr_data: defaultdict[str, list]):
+        aggr_data["losses"].append(loss_func(data[0].squeeze(-1), data[1].float()).item())
+    
+    trainer = CodeSimTrainer(
         model,
-        (train_loader, valid_loader),
+        train_loader=train_loader,
+        valid_loader_wrappers={
+            "CodeNet":
+            EvalDataWrapper(
+                valid_loader,
+                data_embedder=pass_data_classifier,
+                aggr_hooks={
+                    "loss":
+                        aggr_data_loss,
+                    "F1":
+                        aggr_data_classifier,
+                    "roc_auc":
+                        aggr_data_classifier,
+                },
+                metr_hooks={
+                    "loss":
+                        lambda **kwargs: sum(kwargs["losses"])/len(kwargs["losses"]),
+                    "F1":
+                        lambda **kwargs: metrics.calculate_cls_metrics(**kwargs)["F1"],
+                    "roc_auc":
+                        lambda **kwargs: metrics.calculate_cls_metrics(**kwargs)["roc_auc"],
+                },
+            ),
+        },
         loss_func=loss_func,
-        loss_hook=loss_hook,  # loss strategy
+        loss_hook=loss_hook,
         optimizer=optimizer,
         scheduler=scheduler,
         device=DEVICE,
     )
-    trainer.train(epochs=epochs, iters_to_accumulate=iters_to_accumulate)
-
-    def print_reports(y_true, y_pred):
-        report_1 = classification_report(y_true, [int(pred > 0.5) for pred in y_pred])
-        report_2 = classification_report(y_true, [int(pred > 0.7) for pred in y_pred])
-        report_3 = classification_report(y_true, [int(pred > 0.9) for pred in y_pred])
-        print(report_1)
-        print(report_2)
-        print(report_3)
-
-    y_true, y_pred = evaluator(eval_data=valid_data, model=model)
-    """
-    fpr, tpr, thresholds = roc_curve(y_true, y_pred)
-    print("FPR", fpr)
-    print("TPR", tpr)
-    print("THRESHS:", thresholds)
-    print("Reports:")
-    """
+    trainer.train(epochs=config.epochs, iters_to_accumulate=config.iters_to_accumulate)
+    
+    print("Evaluating.")
+    y_true, y_pred = eval_classifier_model(eval_data=test_loader, model=model)
     print_reports(y_true, y_pred)
 
 
-def eval_finetuned_instance(model: SimilarityClassifier, num_rows=5000):
+def finetune_contrastive_model_on_CodeNet(
+    config: configs.CodeSimContrastiveClassifierConfig,
+    data_path="peterverebics/CodeNet_Python_118"
+):
+    config.init_model()
+    
+    if config.finetuning_strategy not in configs.CONTRASTIVE_FINETUNING_STRATEGIES:
+        raise ValueError(f"Invalid finetuning strategy: {config.finetuning_strategy}.")
+    elif config.finetuning_strategy == "triplet_loss":
+        loss_func = nn.TripletMarginWithDistanceLoss(distance_function=distance_function, margin=config.margin)
+        loss_hook = code_sim_models.compute_loss_triplet
+    elif config.finetuning_strategy == "info_nce_loss":
+        loss_func = ContrastiveLoss(temp=config.temp)
+        loss_hook = code_sim_models.compute_loss_tuplet
+    elif config.finetuning_strategy == "combined_loss":
+        local_loss_func = nn.TripletMarginWithDistanceLoss(distance_function=distance_function, margin=config.margin)
+        loss_func = ContrastiveLoss(local_loss_func=local_loss_func,
+                                    temp=config.temp, w_1=config.w_1, w_2=config.w_2)
+        
+        loss_hook = code_sim_models.compute_loss_combined
+    
+    # Dataset Creation
+    tokenizer=AutoTokenizer.from_pretrained(config.pretrained_model_name)
+    tokenizer_args = get_tokenizer_args(256)
+    
+    train_data, valid_data, test_data = code_sim_datasets.Create_CodeNet_triplet_dataset(
+        tokenizer, tokenizer_args, data_path=data_path,
+        num_negatives=config.num_negatives
+    )
+    
+    train_loader, valid_loader, test_loader = code_sim_datasets.get_CodeNet_loaders(
+        train_data, valid_data, test_data, config
+    )
+
+    # Model Creation
+    model = CodeSimContrastiveEncoder(
+        config.pretrained_model,
+        freeze_enc_model=config.freeze_model,
+        pooling_strat=config.pooling_strat,
+        dropout_rate=config.dropout_rate,
+    )
+    model.to(DEVICE)
+    
+    # Trainer
+    optimizer = get_optimizer(model, config.lr_enc, config.wd_enc)
+    scheduler = get_scheduler(train_loader, optimizer, config.epochs, config.iters_to_accumulate)
+    
+    def aggr_data_loss(data, aggr_data: defaultdict[str, list]):
+        aggr_data["losses"].append(loss_func(*data).item())
+        
+    trainer = CodeSimTrainer(
+        model,
+        train_loader=train_loader,
+        valid_loader_wrappers={
+            "CodeNet":
+            EvalDataWrapper(
+                valid_loader,
+                data_embedder=embd_data_contrastive_cls,
+                aggr_hooks={
+                    "loss":
+                        aggr_data_loss,
+                    "F1":
+                        aggr_data_contrastive_cls,
+                    "roc_auc":
+                        aggr_data_contrastive_cls,
+                },
+                metr_hooks={
+                    "loss":
+                        lambda **kwargs: sum(kwargs["losses"])/len(kwargs["losses"]),
+                    "F1":
+                        lambda **kwargs: metrics.calculate_cls_metrics(**kwargs)["F1"],
+                    "roc_auc":
+                        lambda **kwargs: metrics.calculate_cls_metrics(**kwargs)["roc_auc"],
+                },
+            ),
+        },
+        loss_func=loss_func,
+        loss_hook=loss_hook,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        device=DEVICE,
+    )
+    trainer.train(epochs=config.epochs, iters_to_accumulate=config.iters_to_accumulate)
+    
+    print("Evaluating.")
+    y_true, y_pred = eval_contrastive_model_cls(eval_data=test_loader, model=trainer.model)
+    print_reports(y_true, y_pred)
+
+
+def finetune_contrastive_model_on_POJ_104(
+    config: configs.CodeSimContrastiveClassifierConfig,
+    data_path="semeru/Code-Code-CloneDetection-POJ104"
+):
+    config.init_model()
+    
+    if config.finetuning_strategy not in configs.CONTRASTIVE_FINETUNING_STRATEGIES:
+        raise ValueError(f"Invalid finetuning strategy for POJ: {config.finetuning_strategy}")
+    elif config.finetuning_strategy == "combined_loss":
+        raise ValueError(f"Invalid finetuning strategy for POJ: {config.finetuning_strategy}")
+    elif config.finetuning_strategy == "triplet_loss":
+        loss_func = nn.TripletMarginWithDistanceLoss(distance_function=distance_function, margin=config.margin)
+        loss_hook = code_sim_models.compute_loss_triplet
+    elif config.finetuning_strategy == "info_nce_loss":
+        loss_func = ContrastiveLoss(temp=config.temp)
+        loss_hook = code_sim_models.compute_loss_tuplet
+    
+    # Dataset Creation
+    tokenizer = AutoTokenizer.from_pretrained(config.pretrained_model_name)
+    tokenizer_args = get_tokenizer_args()
+    
+    train_data, valid_data, test_data = code_sim_datasets.Create_POJ104_triplet_dataset(
+        tokenizer, tokenizer_args, data_path=data_path,
+        sample_negative=config.finetuning_strategy == "triplet_loss",
+    )
+    
+    train_loader, valid_loader, test_loader = code_sim_datasets.get_POJ104_loaders(
+        train_data, valid_data, test_data, config
+    )
+    
+    # Model Creation
+    model = CodeSimContrastiveEncoder(
+        config.pretrained_model,
+        freeze_enc_model=config.freeze_model,
+        pooling_strat=config.pooling_strat,
+        dropout_rate=config.dropout_rate,
+    )
+    model.to(DEVICE)
+    
+    # Trainer
+    optimizer = get_optimizer(model, config.lr_enc, config.wd_enc)
+    scheduler = get_scheduler(train_loader, optimizer, config.epochs, config.iters_to_accumulate)
+    
+    def aggr_data_loss(data, aggr_data: defaultdict[str, list]):
+        aggr_data["losses"].append(loss_func(*data).item())
+    
+    trainer = CodeSimTrainer(
+        model,
+        train_loader=train_loader,
+        valid_loader_wrappers={
+            "POJ-104":
+            EvalDataWrapper(
+                valid_loader,
+                data_embedder=embd_data_contrastive_map,
+                aggr_hooks={
+                    "loss":
+                        aggr_data_loss,
+                    "map_r":
+                        aggr_data_contrastive_map,
+                },
+                metr_hooks={
+                    "loss":
+                        lambda **kwargs: sum(kwargs["losses"])/len(kwargs["losses"]),
+                    "map_r":
+                        lambda **kwargs: metrics.calculate_map_metrics(**kwargs)["map_r"],
+                },
+            ),
+        },
+        loss_func=loss_func,
+        loss_hook=loss_hook,
+        loss_checkpointing=False,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        device=DEVICE,
+    )
+    trainer.train(epochs=config.epochs, iters_to_accumulate=config.iters_to_accumulate)
+    
+    print("Evaluating.")
+    result = eval_contrastive_model_map(eval_data=test_loader, model=trainer.model)
+    print(result)
+
+
+def eval(model: CodeSimContrastiveEncoder | CodeSimLinearClassifierCross | CodeSimLinearClassifierSBert,
+         data_path="peterverebics/CodeNet_Python_118", num_rows=None):
     set_seed(42)
     model.to(DEVICE)
-    tokenizer = code_sim_models.get_tokenizer(model.bert)
-
-    if isinstance(model, CodeSimLinearCLS):
-        dataset = Create_CodeNet_paired_dataset(
-            DATASET_URLS["paired"],
+    
+    tokenizer=AutoTokenizer.from_pretrained(model.enc_model.name_or_path)
+    
+    if isinstance(model, CodeSimLinearClassifierCross):
+        dataset = code_sim_datasets.Create_CodeNet_paired_dataset(
             tokenizer=tokenizer,
-            num_rows=num_rows,
+            tokenizer_args=get_tokenizer_args(512),
+            data_path=data_path,
             return_single_encoding=True,
         )
-        evaluator = eval_model
-    elif isinstance(model, CodeSimSBertLinearCLS):
-        dataset = Create_CodeNet_paired_dataset(
-            DATASET_URLS["paired"],
+        eval_func = eval_classifier_model
+    elif isinstance(model, CodeSimLinearClassifierSBert):
+        dataset = code_sim_datasets.Create_CodeNet_paired_dataset(
             tokenizer=tokenizer,
-            num_rows=num_rows,
+            tokenizer_args=get_tokenizer_args(256),
+            data_path=data_path,
             return_single_encoding=False,
         )
-        evaluator = eval_model
-    elif isinstance(model, CodeSimSBertTripletCLS):
-        dataset = Create_CodeNet_triplet_dataset(
-            DATASET_URLS["triplet"],
+        eval_func = eval_classifier_model
+    elif isinstance(model, CodeSimContrastiveEncoder):
+        print("Evaluating ", model.enc_model.name_or_path)
+        dataset = code_sim_datasets.Create_CodeNet_triplet_dataset(
             tokenizer=tokenizer,
-            num_rows=num_rows,
+            tokenizer_args=get_tokenizer_args(256),
+            data_path=data_path,
+            num_negatives=1,
         )
-        evaluator = eval_model_triplet
+        eval_func = eval_contrastive_model_cls
     else:
         raise ValueError(f"Invalid model type. {model.__class__.__name__}")
 
-    # This replicates the split in the training function to create validation set of
-    # unseen data, this could be avoided by pre-splitting the datasets...
-    train_len = int(0.8 * len(dataset))
-    valid_len = len(dataset) - train_len
-    _, valid_data = random_split(dataset, [train_len, valid_len])
-
-    def print_reports(y_true, y_pred):
-        report_1 = classification_report(y_true, [int(pred > 0.5) for pred in y_pred])
-        report_2 = classification_report(y_true, [int(pred > 0.7) for pred in y_pred])
-        report_3 = classification_report(y_true, [int(pred > 0.9) for pred in y_pred])
-        print(report_1)
-        print(report_2)
-        print(report_3)
-
-    y_true, y_pred = evaluator(eval_data=valid_data, model=model)
+    _,_, test_loader = code_sim_datasets.get_loaders(*dataset, bs=20, shuffle=False, num_rows=num_rows)
+    
+    y_true, y_pred = eval_func(eval_data=test_loader, model=model)
     print_reports(y_true, y_pred)
     return y_true, y_pred
 
 
-def train_contrastive(
-    pretrained_bert_name: str = "huggingface/CodeBERTa-small-v1",
-    epochs=4,
-    # Learning rates and weight decays
-    lr_bert=1e-5,
-    wd_bert=1e-4,  # bert often needs smaller weight decay
-    lr_proj=1e-4,
-    wd_proj=1e-3,
-    bs=20,  # NOTE: Bigger batch size generally leads to better results in contrastive learning
-    iters_to_accumulate=2,
-    # Model specific parameters
-    freeze_bert=False,  # NOTE: if true the BERT model is not finetuned
-    dropout_rate=0.2,
-    shuffle_dataloader=True,
-    # Flag for self supervised training
-    is_self_supervised=False,
-    # Temperature hyperparameter for NTXent loss
-    temperature=0.5,
-    num_rows=5000,
-):
-    tokenizer = AutoTokenizer.from_pretrained(pretrained_bert_name)
-
-    if is_self_supervised:
-        url = DATASET_URLS["contrastive_selfsup"]
-        cls = code_sim_datasets.SelfSupCodeDataset
-        ntxent_loss = losses.NTXentLoss(temperature=temperature)
-    else:
-        url = DATASET_URLS["contrastive_labeled"]
-        cls = code_sim_datasets.LabeledCodeDataset
-        # Wrap the NTXent loss function if training with a self supervised method
-        ntxent_loss = losses.SelfSupervisedLoss(
-            losses.NTXentLoss(temperature=temperature)
-        )
-
-    dataset = cls.from_csv_data(
-        path=url,
-        tokenizer=tokenizer,
-        aug_funcs=[],  # NOTE: precalculated data augmentation functions can be added here
-        device=DEVICE,
-    )
-    print("Initial dataset size:", len(dataset))
-
-    # TODO: don't hardcode this number V
-    sample_size = min(len(dataset), num_rows)
-    dataset = Subset(dataset, list(range(sample_size)))
-
-    print("Sampled dataset size:", len(dataset))
-
-    train_len = int(0.8 * len(dataset))
-    valid_len = len(dataset) - train_len
-    train_data, valid_data = random_split(dataset, [train_len, valid_len])
-    train_loader = DataLoader(train_data, batch_size=bs, shuffle=shuffle_dataloader)
-    valid_loader = DataLoader(valid_data, batch_size=bs, shuffle=shuffle_dataloader)
-
-    if shuffle_dataloader:
-        print("Dataloaders will be shuffled...")
-
-    bert_model = AutoModel.from_pretrained(pretrained_bert_name).to(DEVICE)
-
-    model = CodeSimContrastiveCLS(
-        bert_model,
-        freeze_bert=freeze_bert,
-        dropout_rate=dropout_rate,
-    )
-    model.to(DEVICE)
-
-    # TODO: Maybe don't pass frozen params, IDK...
-    # NOTE: Allow different lr and wd for BERT and projection head params
-    param_groups = [
-        {"params": model.bert.parameters(), "lr": lr_bert, "weight_decay": wd_bert},
-        {"params": model.proj.parameters(), "lr": lr_proj, "weight_decay": wd_proj},
-    ]
-    optimizer = torch.optim.AdamW(param_groups)
-
-    # Training and warmup steps
-    # NOTE: Necessary to take into account Gradient accumulation
-    num_training_steps = (epochs * len(train_loader)) // iters_to_accumulate
-    num_warmup_steps = int(num_training_steps * 0.1)  # 10% warmup
-
-    scheduler = get_linear_schedule_with_warmup(
-        optimizer=optimizer,
-        num_training_steps=num_training_steps,
-        # The number of steps for the warmup phase.
-        num_warmup_steps=num_warmup_steps,
-    )
-
-    trainer = code_sim_models.CodeSimilarityTrainer(
-        model,
-        (train_loader, valid_loader),
-        loss_func=ntxent_loss,
-        loss_hook=code_sim_models.compute_loss_contrastive,  # loss strategy
-        optimizer=optimizer,
-        scheduler=scheduler,
-        device=DEVICE,
-    )
-    trainer.train(epochs=epochs, iters_to_accumulate=iters_to_accumulate)
-
-
-def eval_model(eval_data: Subset, model: SimilarityClassifier):
-    class RawCodeWrapper(Dataset):
-        def __init__(self, subset: Subset):
-            # Subset of the original dataset
-            self.subset = subset
-
-        def __getitem__(self, idx):
-            original_idx = self.subset.indices[idx]
-            return (
-                self.subset.dataset.codes_a[original_idx],
-                self.subset.dataset.codes_b[original_idx],
-                self.subset.dataset.labels[original_idx],
-            )
-
-        def __len__(self):
-            return len(self.subset)
-
-    dataset = RawCodeWrapper(eval_data)
-
+@torch.no_grad
+def eval_classifier_model(eval_data: DataLoader, model: CodeSimLinearClassifierCross | CodeSimLinearClassifierSBert):
     model.eval()
-
-    y_true, y_pred = [], []
-    with torch.no_grad():
-        for codes1, codes2, labels in tqdm(DataLoader(dataset, batch_size=20)):
-            preds = model.predict(codes1, codes2)
-            # Store predictions and labels
-            y_true.extend(labels.cpu().tolist())
-            y_pred.extend(preds.cpu().tolist())
-
+    aggr_data = defaultdict(list)
+    for data in tqdm(eval_data):
+        data = pass_data_classifier(data, model, DEVICE)
+        aggr_data_classifier(data, aggr_data)
+    y_true = aggr_data['y_true']
+    y_pred = aggr_data['y_pred']
     return y_true, y_pred
 
 
-def eval_model_triplet(eval_data: Subset, model: SimilarityClassifier):
-    class RawCodeWrapper(Dataset):
-        def __init__(self, subset: Subset):
-            # Subset of the original dataset
-            self.subset = subset
-
-        def __getitem__(self, idx):
-            original_idx = self.subset.indices[idx]
-            return (
-                self.subset.dataset.codes_a[original_idx],
-                self.subset.dataset.codes_p[original_idx],
-                self.subset.dataset.codes_n[original_idx],
-            )
-
-        def __len__(self):
-            return len(self.subset)
-
-    dataset = RawCodeWrapper(eval_data)
-
+@torch.no_grad
+def eval_contrastive_model_cls(eval_data: DataLoader, model: CodeSimContrastiveEncoder):
     model.eval()
-
-    y_true, y_pred = [], []
-    with torch.no_grad():
-        for codes_a, codes_p, codes_n in tqdm(DataLoader(dataset, batch_size=20)):
-            preds_p = model.predict(codes_a, codes_p)
-            preds_n = model.predict(codes_a, codes_n)
-            # Convert to lists
-            preds_p = preds_p.cpu().tolist()
-            preds_n = preds_n.cpu().tolist()
-            # Store predictions and labels
-            y_true.extend([1] * len(preds_p))
-            y_true.extend([0] * len(preds_n))
-            y_pred.extend(preds_p)
-            y_pred.extend(preds_n)
-
+    aggr_data = defaultdict(list)
+    for data in tqdm(eval_data):
+        emb_data = embd_data_contrastive_cls(data, model, DEVICE)
+        aggr_data_contrastive_cls(emb_data, aggr_data)
+    y_true = aggr_data['y_true']
+    y_pred = aggr_data['y_pred']
     return y_true, y_pred
 
 
-TRAIN_FUNCS = {
-    "finetuned": (
-        train_finetuned,
-        {
-            "finetuning_strategy": "linear_binary_cls",
-            "pretrained_bert_name": "huggingface/CodeBERTa-small-v1",
-            "epochs": 4,
-            "lr": 1e-5,  # Learning rate
-            "wd": 1e-5,  # Weight decay
-            # Batch size
-            "bs": 20,
-            # The gradient accumulation adds gradients over an effective batch of size : bs * iters_to_accumulate.
-            # If set to "1", you get the usual batch size
-            "iters_to_accumulate": 2,
-            # Model specific parameters
-            "freeze_bert": False,  # NOTE: if true the BERT model is not finetuned
-            "dropout_rate": 0.2,
-            "shuffle_dataloader": True,
-            "num_rows": 5000,
-        },
-    ),
-    "contrastive": (
-        train_contrastive,
-        {
-            "pretrained_bert_name": "huggingface/CodeBERTa-small-v1",
-            "epochs": 4,
-            # Learning rates and weight decays
-            "lr_bert": 1e-5,
-            "wd_bert": 1e-4,
-            "lr_proj": 1e-4,
-            "wd_proj": 1e-3,
-            # Batch size
-            "bs": 20,  # NOTE: Bigger batch size generally leads to better results in contrastive learning
-            "iters_to_accumulate": 2,
-            # Model specific parameters
-            "freeze_bert": False,  # NOTE: if true the BERT model is not finetuned
-            "dropout_rate": 0.2,
-            "shuffle_dataloader": True,
-            "is_self_supervised": False,
-            "temperature": 0.5,
-            "num_rows": 5000,
-        },
-    ),
-}
-
-
-if __name__ == "__main__":
-    # TODO: Maybe load this from a .env or something
-    set_seed(42)
-    # Parse the model type first
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--model_type",
-        choices=TRAIN_FUNCS.keys(),
-        required=True,
-        help="Model type to train",
-    )
-    known_args, unknown_args = parser.parse_known_args()
-    # Select the train function and default parameters
-    train_func, default_params = TRAIN_FUNCS[known_args.model_type]
-    # Parse the rest of the parameters based on default ones
-    parser = argparse.ArgumentParser()
-    for param, default in default_params.items():
-        parser.add_argument(f"--{param}", type=type(default), default=default)
-    args = parser.parse_args(unknown_args)
-    # Train the model
-    train_func(**vars(args))
+@torch.no_grad
+def eval_contrastive_model_map(eval_data: DataLoader, model: CodeSimContrastiveEncoder):
+    model.eval()
+    aggr_data = defaultdict(list)
+    for data in tqdm(eval_data):
+        emb_data = embd_data_contrastive_map(data, model, DEVICE)
+        aggr_data_contrastive_map(emb_data, aggr_data)
+    all_embs = torch.cat(aggr_data["all_embs"], dim=0)
+    all_lbls = torch.cat(aggr_data["all_lbls"], dim=0)
+    result = metrics.calculate_map_at_R(all_embs, all_lbls, R=499)
+    return result

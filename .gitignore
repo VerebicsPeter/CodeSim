@@ -21,5 +21,12 @@ paths.ini
 
 .ipynb_checkpoints
 
-# Model state dicts
+# Model state dicts and caches
 *.pt
+*_cahced/
+
+# Anything pickled
+*.pickle
+
+# Playground notebooks
+playground_*.ipynb
