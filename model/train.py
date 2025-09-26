@@ -194,7 +194,7 @@ def finetune_contrastive_model_on_CodeNet(
     elif config.finetuning_strategy == "combined_loss":
         local_loss_func = nn.TripletMarginWithDistanceLoss(distance_function=distance_function, margin=config.margin)
         loss_func = ContrastiveLoss(local_loss_func=local_loss_func,
-                                    temp=config.temp, w_1=config.w_1, w_2=config.w_2)
+                                    temp=config.temp, w1=config.w_1, w2=config.w_2)
         
         loss_hook = code_sim_models.compute_loss_combined
     
