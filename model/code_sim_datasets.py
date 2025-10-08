@@ -146,13 +146,14 @@ class CodeNetHardMiningTripletDataset(CodeNetRandomTripletDataset):
         assert "embedding" in self.hf_dataset.column_names, \
             "Hard mining dataset requires an 'embedding' column in hf_dataset"
         # Stack all embeddings into a single tensor
-        emb_list = self.hf_dataset["embedding"]
-        if isinstance(emb_list[0], torch.Tensor):
-            self.embeddings = torch.stack(emb_list)
+        embeddings = self.hf_dataset["embedding"]
+        if isinstance(embeddings, torch.Tensor):
+            self.embeddings = embeddings
         else:
-            self.embeddings = torch.tensor(emb_list, dtype=torch.float)
+            self.embeddings = torch.tensor(embeddings, dtype=torch.float)
         # Normalize for cosine similarity
         self.embeddings = F.normalize(self.embeddings, dim=-1)
+        print(f"Cached embeddings shaped: {self.embeddings.shape}.")
 
     def __getitem__(self, pid):
         keys = ["input_ids", "attention_mask"]
