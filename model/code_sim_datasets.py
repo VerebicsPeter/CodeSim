@@ -4,6 +4,7 @@ import random
 import datasets
 from transformers import default_data_collator
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, Sampler, Subset
 from collections import defaultdict
 from functools import partial
@@ -11,8 +12,8 @@ from functools import partial
 from model import configs
 
 
-def tokenize_fn(tokenizer, tokenizer_args, examples):
-    return tokenizer(examples["code"], **tokenizer_args)
+def tokenize_fn(tokenizer, tokenizer_args, examples, code_column="code"):
+    return tokenizer(examples[code_column], **tokenizer_args)
 
 
 def init_problem_indices(hf_dataset):
@@ -136,6 +137,53 @@ class CodeNetRandomTripletDataset(Dataset):
         return a_enc, p_enc, n_encs
 
 
+class CodeNetHardMiningTripletDataset(CodeNetRandomTripletDataset):
+    def __init__(self, hf_dataset, deterministic=False, num_negatives=1):
+        super().__init__(hf_dataset, deterministic, num_negatives)
+
+    def cache_embeddings(self):
+        # Ensure the embeddings exist
+        assert "embedding" in self.hf_dataset.column_names, \
+            "Hard mining dataset requires an 'embedding' column in hf_dataset"
+        # Stack all embeddings into a single tensor
+        emb_list = self.hf_dataset["embedding"]
+        if isinstance(emb_list[0], torch.Tensor):
+            self.embeddings = torch.stack(emb_list)
+        else:
+            self.embeddings = torch.tensor(emb_list, dtype=torch.float)
+        # Normalize for cosine similarity
+        self.embeddings = F.normalize(self.embeddings, dim=-1)
+
+    def __getitem__(self, pid):
+        keys = ["input_ids", "attention_mask"]
+        rng = random.Random(42) if self.deterministic else random
+
+        # Anchor selection
+        a_idx = rng.choice(self.problem_id_to_passing_idxs[pid])
+        a_emb = self.embeddings[a_idx].unsqueeze(0)  # shape: [1, D]
+
+        # Hard positive (least similar other passing)
+        passing_idxs = self.problem_id_to_passing_idxs[pid]
+        p_embs = self.embeddings[passing_idxs]
+        sims = F.cosine_similarity(a_emb, p_embs)
+        p_idx = passing_idxs[torch.argmin(sims).item()]  # least similar positive
+        
+        # Hard negatives (most similar failing) ---
+        failing_idxs = self.problem_id_to_failing_idxs[pid]
+        f_embs = self.embeddings[failing_idxs]
+        sims = F.cosine_similarity(a_emb, f_embs)
+        n_top = torch.topk(sims, k=min(self.num_negatives, len(failing_idxs)))
+        n_idxs = [failing_idxs[i] for i in n_top.indices.tolist()]
+
+        # --- Prepare encodings ---
+        a_enc = {k: v for k, v in self.hf_dataset[a_idx].items() if k in keys}
+        p_enc = {k: v for k, v in self.hf_dataset[p_idx].items() if k in keys}
+        n_encs = [{k: v for k, v in self.hf_dataset[n_idx].items() if k in keys} for n_idx in n_idxs]
+
+        return a_enc, p_enc, n_encs
+
+
+
 class POJ104Dataset(Dataset):
     """Simple wrapper for the POJ-104 dataset."""
     
@@ -216,6 +264,7 @@ def Create_CodeNet_triplet_dataset(
     tokenizer_args,
     data_path="peterverebics/CodeNet_Python_118",
     num_negatives=1,
+    use_hard_mining=False,
 ):
     print("Creating CodeNet dataset. Data type: triplet")
     tokenize = partial(tokenize_fn, tokenizer, tokenizer_args)
@@ -223,8 +272,12 @@ def Create_CodeNet_triplet_dataset(
     dataset = datasets.load_dataset(data_path).map(tokenize, batched=True)
     dataset.set_format(type="torch", columns=["input_ids", "attention_mask"], output_all_columns=True)
     
-    train_ds = CodeNetRandomTripletDataset(dataset["train"],
-                                           num_negatives=num_negatives, deterministic=False)
+    if use_hard_mining:
+        train_ds = CodeNetRandomTripletDataset(
+            dataset["train"], num_negatives=num_negatives, deterministic=False)
+    else:
+        train_ds = CodeNetHardMiningTripletDataset(
+            dataset["train"], num_negatives=num_negatives, deterministic=False)
     valid_ds = CodeNetRandomTripletDataset(dataset["validation"],
                                            num_negatives=num_negatives, deterministic=True)
     test_ds = CodeNetTripletDataset(dataset["test"])
@@ -358,3 +411,42 @@ def get_POJ104_loaders(
     valid_loader = DataLoader(valid_data, batch_size=config.bs, shuffle=False)
     test_loader = DataLoader(test_data, batch_size=config.bs, shuffle=False)
     return train_loader, valid_loader, test_loader
+
+
+class EquiBenchDataset(Dataset):
+    def __init__(self, hf_dataset: datasets.Dataset, tokenizer, tokenizer_args):
+        def add_num_label(examples):
+            return {"num_truth_label": [int(x) for x in examples["truth_label"]]}
+
+        def tokenize_func(examples):
+            out1 = tokenizer(examples["program_1_code"], **tokenizer_args)
+            out2 = tokenizer(examples["program_2_code"], **tokenizer_args)
+            return {
+                "program_1_input_ids": out1["input_ids"],
+                "program_1_attention_mask": out1["attention_mask"],
+                "program_2_input_ids": out2["input_ids"],
+                "program_2_attention_mask": out2["attention_mask"],
+            }
+        
+        self.hf_dataset = (
+            hf_dataset
+            .map(add_num_label, batched=True)
+            .map(tokenize_func, batched=True)
+        )
+        self.hf_dataset.set_format(
+            type="torch",
+            columns=[
+                "program_1_input_ids", 
+                "program_1_attention_mask",
+                "program_2_input_ids",
+                "program_2_attention_mask"
+            ],
+            output_all_columns=True
+        )
+
+    def __len__(self):
+        return len(self.hf_dataset)
+    
+    def __getitem__(self, idx):
+        item = self.hf_dataset[idx]
+        return item

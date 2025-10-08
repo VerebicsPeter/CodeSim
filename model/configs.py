@@ -85,3 +85,4 @@ class CodeSimContrastiveClassifierConfig(BaseConfig):
     num_negatives: int = 1  # InfoNCE-inspired loss hard negatives
     w_1: float = 1.0  # Weight for InfoNCE Loss
     w_2: float = 1.0  # Weight for Triplet Loss
+    use_hard_mining: bool = False

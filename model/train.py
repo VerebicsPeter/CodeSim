@@ -204,7 +204,7 @@ def finetune_contrastive_model_on_CodeNet(
     
     train_data, valid_data, test_data = code_sim_datasets.Create_CodeNet_triplet_dataset(
         tokenizer, tokenizer_args, data_path=data_path,
-        num_negatives=config.num_negatives
+        num_negatives=config.num_negatives, use_hard_mining=config.use_hard_mining,
     )
     
     train_loader, valid_loader, test_loader = code_sim_datasets.get_CodeNet_loaders(
@@ -223,10 +223,30 @@ def finetune_contrastive_model_on_CodeNet(
     # Trainer
     optimizer = get_optimizer(model, config.lr_enc, config.wd_enc)
     scheduler = get_scheduler(train_loader, optimizer, config.epochs, config.iters_to_accumulate)
-    
+
+    def train_data_embedder(dataset, model, device=DEVICE):
+        model.eval()
+        
+        def compute_embeddings(batch, model=model):
+            keys = ["input_ids", "attention_mask"]
+            # convert input lists to tensors and move to device
+            batch = {k: torch.tensor(v).to(device) for k,v in batch.items() if k in keys}
+
+            with torch.no_grad(): embeddings = model.forward(batch).detach()
+
+            return { "embedding": embeddings }
+
+        dataset.hf_dataset = dataset.hf_dataset.map(
+            lambda batch: compute_embeddings(batch),
+            batched=True,
+            batch_size=config.bs,
+            desc="Computing embeddings with BERT",
+        )
+        dataset.cache_embeddings()
+
     def aggr_data_loss(data, aggr_data: defaultdict[str, list]):
         aggr_data["losses"].append(loss_func(*data).item())
-        
+
     trainer = CodeSimTrainer(
         model,
         train_loader=train_loader,
@@ -258,6 +278,8 @@ def finetune_contrastive_model_on_CodeNet(
         optimizer=optimizer,
         scheduler=scheduler,
         device=DEVICE,
+        train_data=train_data,
+        train_data_embedder=train_data_embedder,
     )
     trainer.train(epochs=config.epochs, iters_to_accumulate=config.iters_to_accumulate)
     

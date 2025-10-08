@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.amp import autocast, GradScaler
-from torch.utils.data import DataLoader
+from torch.utils.data import Dataset, DataLoader
 
 # Hugging Face Transformers
 import transformers
@@ -67,6 +67,8 @@ class CodeSimTrainer:
         optimizer,
         scheduler,
         device: torch.device,
+        train_data: Dataset | None = None,
+        train_data_embedder: Callable | None = None,
     ):
         self.model = model
         self.train_loader = train_loader
@@ -84,6 +86,9 @@ class CodeSimTrainer:
         self.scheduler = scheduler
         self.device = device
         self.scaler = GradScaler(self.device)
+        
+        self.train_data = train_data
+        self.train_data_embedder = train_data_embedder    
     
     def train_step(self, iters_to_accumulate: int, print_every: int):
         """Train one epoch."""
@@ -146,7 +151,12 @@ class CodeSimTrainer:
         return metrics
 
     
-    def train(self, epochs: int, iters_to_accumulate: int = 2):
+    def train(self,
+        epochs: int,
+        iters_to_accumulate: int = 2,
+        print_every: int | None = None,
+        cache_every: int | None = None,
+    ):
         # Path to save the best model to
         BEST_MODEL_PATH = "best_model.pt"
         LAST_MODEL_PATH = "last_model.pt"
@@ -156,10 +166,17 @@ class CodeSimTrainer:
         train_losses, valid_losses = [],[]
         metrics_history = []
         
-        # Print training loss 5 times per epoch
-        print_every = len(self.train_loader) // 5
+        # Print training loss 5 times per epoch by default
+        if print_every is None: 
+            print_every = len(self.train_loader) // 5
+        # Calculate and cache training set embeddings every epoch by default
+        if cache_every is None:
+            cache_every = 1
         
         for epoch in range(epochs):
+            if epoch % cache_every == 0:
+                if self.train_data_embedder is not None: self.train_data_embedder(self.train_data, self.model)
+                
             print(f'EPOCH {epoch + 1}/{epochs}')
             train_loss = self.train_step(iters_to_accumulate, print_every)
             valid_loss = np.inf
@@ -522,6 +539,34 @@ def aggr_data_contrastive_cls(data, aggr_data: defaultdict[str, list]):
     aggr_data['y_true'].extend([0] * len(preds_n))
     aggr_data['y_pred'].extend(preds_p)
     aggr_data['y_pred'].extend(preds_n)
+
+
+def embd_data_contrastive_cls_pair(data, model: CodeSimContrastiveEncoder, device: torch.device):
+    encs_1 = {
+        "input_ids": data["program_1_input_ids"],
+        "attention_mask": data["program_1_attention_mask"],
+    }
+    encs_2 = {
+        "input_ids": data["program_2_input_ids"],
+        "attention_mask": data["program_2_attention_mask"],
+    }
+    lbls = data["num_truth_label"]
+    keys = encs_1.keys() & encs_2.keys()
+
+    batch_size = encs_1["input_ids"].shape[0]
+    inputs = {key: torch.cat([encs_1[key], encs_2[key]]) for key in keys}
+    put_batch_encoding_to_device(inputs, device)
+    outputs = model.forward(inputs)
+    embs_1, embs_2 = outputs.split(batch_size)
+    return embs_1, embs_2, lbls
+
+def aggr_data_contrastive_cls_pair(data, aggr_data: defaultdict[str, list]):
+    embs_1, embs_2, lbls = data
+    sims = F.cosine_similarity(embs_1, embs_2, dim=1)
+    trues = lbls.cpu().tolist()
+    preds = sims.cpu().tolist()
+    aggr_data["y_true"].extend(trues)
+    aggr_data["y_pred"].extend(preds)
 
 
 def embd_data_contrastive_map(data, model: CodeSimContrastiveEncoder, device: torch.device):
