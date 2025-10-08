@@ -174,8 +174,11 @@ class CodeSimTrainer:
             cache_every = 1
         
         for epoch in range(epochs):
-            if epoch % cache_every == 0:
-                if self.train_data_embedder is not None: self.train_data_embedder(self.train_data, self.model)
+            if (epoch % cache_every == 0
+            and self.train_data          is not None
+            and self.train_data_embedder is not None
+            ):
+                self.train_data_embedder(self.train_data, self.model)
                 
             print(f'EPOCH {epoch + 1}/{epochs}')
             train_loss = self.train_step(iters_to_accumulate, print_every)

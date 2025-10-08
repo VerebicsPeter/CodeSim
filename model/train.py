@@ -194,7 +194,7 @@ def finetune_contrastive_model_on_CodeNet(
     elif config.finetuning_strategy == "combined_loss":
         local_loss_func = nn.TripletMarginWithDistanceLoss(distance_function=distance_function, margin=config.margin)
         loss_func = ContrastiveLoss(local_loss_func=local_loss_func,
-                                    temp=config.temp, w_1=config.w_1, w_2=config.w_2)
+                                    temp=config.temp, w1=config.w_1, w2=config.w_2)
         
         loss_hook = code_sim_models.compute_loss_combined
     
@@ -230,7 +230,7 @@ def finetune_contrastive_model_on_CodeNet(
         def compute_embeddings(batch, model=model):
             keys = ["input_ids", "attention_mask"]
             # convert input lists to tensors and move to device
-            batch = {k: torch.tensor(v).to(device) for k,v in batch.items() if k in keys}
+            batch = {k: v.clone().to(device) for k,v in batch.items() if k in keys}
 
             with torch.no_grad(): embeddings = model.forward(batch).detach()
 
@@ -240,7 +240,7 @@ def finetune_contrastive_model_on_CodeNet(
             lambda batch: compute_embeddings(batch),
             batched=True,
             batch_size=config.bs,
-            desc="Computing embeddings with BERT",
+            desc="Computing embeddings",
         )
         dataset.cache_embeddings()
 
@@ -278,8 +278,8 @@ def finetune_contrastive_model_on_CodeNet(
         optimizer=optimizer,
         scheduler=scheduler,
         device=DEVICE,
-        train_data=train_data,
-        train_data_embedder=train_data_embedder,
+        train_data=train_data if config.use_hard_mining else None,
+        train_data_embedder=train_data_embedder if config.use_hard_mining else None,
     )
     trainer.train(epochs=config.epochs, iters_to_accumulate=config.iters_to_accumulate)
     

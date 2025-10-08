@@ -273,13 +273,14 @@ def Create_CodeNet_triplet_dataset(
     dataset.set_format(type="torch", columns=["input_ids", "attention_mask"], output_all_columns=True)
     
     if use_hard_mining:
-        train_ds = CodeNetRandomTripletDataset(
-            dataset["train"], num_negatives=num_negatives, deterministic=False)
-    else:
         train_ds = CodeNetHardMiningTripletDataset(
             dataset["train"], num_negatives=num_negatives, deterministic=False)
-    valid_ds = CodeNetRandomTripletDataset(dataset["validation"],
-                                           num_negatives=num_negatives, deterministic=True)
+    else:
+        train_ds = CodeNetRandomTripletDataset(
+            dataset["train"], num_negatives=num_negatives, deterministic=False)
+
+    valid_ds = CodeNetRandomTripletDataset(
+        dataset["validation"], num_negatives=num_negatives, deterministic=True)
     test_ds = CodeNetTripletDataset(dataset["test"])
     return train_ds, valid_ds, test_ds
 
